@@ -1582,10 +1582,10 @@ void mobile_ui_system::import_mods_from_disk()
 
     // Tenta pre-criar as pastas publicas em Documentos para facilitar o acesso do jogador
     try {
-        assure_dir_exist( "/storage/emulated/0/Documents/CataclysmDDA" );
-        assure_dir_exist( "/storage/emulated/0/Documents/CataclysmDDA/import_mods" );
-        assure_dir_exist( "/storage/emulated/0/Documents/CataclysmDDA/mods" );
-        assure_dir_exist( "/storage/emulated/0/Documents/CataclysmDDA/save" );
+        std::error_code ec;
+        std::filesystem::create_directories( std::filesystem::u8path( "/storage/emulated/0/Documents/CataclysmDDA/import_mods" ), ec );
+        std::filesystem::create_directories( std::filesystem::u8path( "/storage/emulated/0/Documents/CataclysmDDA/mods" ), ec );
+        std::filesystem::create_directories( std::filesystem::u8path( "/storage/emulated/0/Documents/CataclysmDDA/save" ), ec );
     } catch( ... ) {}
 
     int imported_count = 0;
