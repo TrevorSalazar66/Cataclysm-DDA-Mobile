@@ -1570,16 +1570,33 @@ void mobile_ui_system::refresh_mods_list()
 
 void mobile_ui_system::import_mods_from_disk()
 {
-    std::string import_dir = PATH_INFO::user_dir() + "import_mods/";
     std::string dest_dir = PATH_INFO::user_moddir();
-
-    assure_dir_exist( import_dir );
     assure_dir_exist( dest_dir );
+
+    // Pastas de busca para importacao (tanto a interna quanto a publica em Documentos)
+    std::vector<std::string> import_dirs = {
+        "/storage/emulated/0/Documents/CataclysmDDA/import_mods/",
+        "/storage/emulated/0/Documents/CataclysmDDA/mods/",
+        PATH_INFO::user_dir() + "import_mods/"
+    };
+
+    // Tenta pre-criar as pastas publicas em Documentos para facilitar o acesso do jogador
+    try {
+        assure_dir_exist( "/storage/emulated/0/Documents/CataclysmDDA" );
+        assure_dir_exist( "/storage/emulated/0/Documents/CataclysmDDA/import_mods" );
+        assure_dir_exist( "/storage/emulated/0/Documents/CataclysmDDA/mods" );
+        assure_dir_exist( "/storage/emulated/0/Documents/CataclysmDDA/save" );
+    } catch( ... ) {}
 
     int imported_count = 0;
 
-    try {
-        for( const auto &entry : std::filesystem::directory_iterator( std::filesystem::u8path( import_dir ) ) ) {
+    for( const auto &import_dir : import_dirs ) {
+        if( !dir_exist( import_dir ) ) {
+            continue;
+        }
+
+        try {
+            for( const auto &entry : std::filesystem::directory_iterator( std::filesystem::u8path( import_dir ) ) ) {
             if( entry.is_regular_file() ) {
                 std::string ext = entry.path().extension().u8string();
                 std::transform( ext.begin(), ext.end(), ext.begin(), ::tolower );
@@ -1617,7 +1634,8 @@ void mobile_ui_system::import_mods_from_disk()
                 } catch( ... ) {}
             }
         }
-    } catch( ... ) {}
+        } catch( ... ) {}
+    }
 
     refresh_mods_list();
 
