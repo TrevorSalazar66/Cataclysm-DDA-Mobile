@@ -2195,7 +2195,8 @@ void mobile_ui_system::load_all_schemes()
                 s.is_default = false;
 
                 try {
-                    read_from_file_json( cata_path::create_from_utf8( file_path ), [&]( const JsonValue &jv ) {
+                    cata_path cp( cata_path::root_path::unknown, file_path );
+                    read_from_file_json( cp, [&]( const JsonValue &jv ) {
                         JsonObject jo = jv.get_object();
                         jo.allow_omitted_members();
                         if( jo.has_string( "name" ) ) {
@@ -2205,8 +2206,9 @@ void mobile_ui_system::load_all_schemes()
                             s.description = jo.get_string( "description" );
                         }
                         if( jo.has_array( "triggers" ) ) {
-                            for( const JsonValue tv : jo.get_array( "triggers" ) ) {
-                                JsonObject to = tv.get_object();
+                            JsonArray ja = jo.get_array( "triggers" );
+                            for( size_t ti = 0; ti < ja.size(); ++ti ) {
+                                JsonObject to = ja.get_object( ti );
                                 to.allow_omitted_members();
                                 custom_trigger trig;
                                 if( to.has_string( "id" ) ) trig.id = to.get_string( "id" );
@@ -2217,9 +2219,7 @@ void mobile_ui_system::load_all_schemes()
                                 if( to.has_float( "opacity" ) ) trig.opacity = to.get_float( "opacity" );
                                 if( to.has_int( "color_theme" ) ) trig.color_theme = to.get_int( "color_theme" );
                                 if( to.has_array( "keys" ) ) {
-                                    for( int k : to.get_array( "keys" ) ) {
-                                        trig.keys.push_back( k );
-                                    }
+                                    trig.keys = to.get_int_array( "keys" );
                                 }
                                 s.triggers.push_back( trig );
                             }
@@ -2250,7 +2250,8 @@ void mobile_ui_system::save_scheme_to_disk( const interface_scheme &scheme )
     std::string file_name = scheme.id + ".json";
     std::string file_path = internal_dir + file_name;
 
-    write_to_file( cata_path::create_from_utf8( file_path ), [&]( std::ostream &fout ) {
+    cata_path cp( cata_path::root_path::unknown, file_path );
+    write_to_file( cp, [&]( std::ostream &fout ) {
         JsonOut json( fout, true );
         json.start_object();
         json.member( "id", scheme.id );
