@@ -224,6 +224,9 @@ bool mobile_ui_system::is_gameplay_ready() const
 
 bool mobile_ui_system::is_menu_active() const
 {
+    if( input_context::input_context_stack.empty() ) {
+        return false;
+    }
     input_context *top_ctx = input_context::input_context_stack.back();
     if( !top_ctx ) {
         return false;
@@ -284,7 +287,11 @@ void mobile_ui_system::calculate_geometry( int w, int h )
     // Escala de densidade adaptada para telas modernas (Poco X7 Pro, FHD+, 2K, etc.)
     // Poco X7 Pro: 2712 x 1220 => min_dim = 1220 => density_scale = ~1.90f
     float min_dim = static_cast<float>( std::min( w, h ) );
-    float density_scale = std::clamp( min_dim / 640.0f, 1.25f, 2.8f );
+    float opt_density = get_option<float>( "MOBILE_UI_DENSITY_SCALE" );
+    if( opt_density <= 0.1f ) {
+        opt_density = 1.0f;
+    }
+    density_scale = std::clamp( ( min_dim / 640.0f ) * opt_density, 1.25f, 3.5f );
 
     // Margens de seguranca para evitar bordas de tela, cortes arredondados e barra de gestos do HyperOS
     float safe_margin_x = 36.0f * density_scale;
@@ -688,8 +695,6 @@ void mobile_ui_system::draw_vital_stats_bar( const SDL_Renderer_Ptr &renderer, F
         return;
     }
 
-    float min_dim = static_cast<float>( std::min( screen_width, screen_height ) );
-    float density_scale = std::clamp( min_dim / 640.0f, 1.25f, 2.8f );
     float safe_margin_x = 36.0f * density_scale;
     float safe_margin_top = 18.0f * density_scale;
     int hub_btn_size = static_cast<int>( 46.0f * density_scale );
@@ -856,7 +861,7 @@ bool mobile_ui_system::handle_touch_down( float x, float y, int finger_id, uint3
     // 3. Dynamic Context Slots e Aba Retratil (apenas em jogo ativo)
     if( gameplay_ready ) {
         // Checar toque na mini-aba retratil da lateral direita (com folga confortavel para o dedo)
-        int margin = static_cast<int>( 15.0f * get_option<float>( "MOBILE_UI_DENSITY_SCALE" ) );
+        int margin = static_cast<int>( 15.0f * density_scale );
         if( x >= context_toggle_btn.x - margin && x <= screen_width &&
             y >= context_toggle_btn.y - margin && y <= context_toggle_btn.y + context_toggle_btn.h + margin ) {
             toggle_context_drawer();
@@ -1052,6 +1057,7 @@ void mobile_ui_system::reset_to_defaults()
     get_options().get_option( "MOBILE_SWAP_SIDES" ).setValue( "false" );
     get_options().get_option( "MOBILE_GLOBAL_FONT_SCALE" ).setValue( 1.0f );
     get_options().get_option( "MOBILE_GAMMA_BOOST" ).setValue( 1.0f );
+    get_options().get_option( "MOBILE_UI_DENSITY_SCALE" ).setValue( 1.0f );
     get_options().save();
     calculate_geometry( screen_width, screen_height );
 }

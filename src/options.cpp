@@ -3465,6 +3465,11 @@ void options_manager::add_options_android()
              to_translation( "Clareia a renderização do jogo para visualização sob a luz do sol." ),
              0.5f, 2.5f, 1.0f, 0.05f, COPT_NO_HIDE, "%.2f"
            );
+
+        add( "MOBILE_UI_DENSITY_SCALE", page_id, to_translation( "Escala de Densidade Touch" ),
+             to_translation( "Multiplicador de densidade de tela e margens da interface mobile." ),
+             0.5f, 3.0f, 1.0f, 0.05f, COPT_NO_HIDE, "%.2f"
+           );
     } );
 }
 

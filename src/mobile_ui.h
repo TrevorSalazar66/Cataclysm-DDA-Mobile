@@ -195,6 +195,7 @@ private:
     // Internal state
     int screen_width = 1280;
     int screen_height = 720;
+    float density_scale = 1.0f;
     bool initialized = false;
     bool settings_open = false;
     bool context_drawer_expanded = false;
