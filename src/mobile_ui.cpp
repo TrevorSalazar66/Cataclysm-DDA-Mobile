@@ -47,6 +47,7 @@ void mobile_ui_system::init()
     }
     setup_default_buttons();
     calculate_geometry( screen_width, screen_height );
+    load_all_schemes();
     initialized = true;
 }
 
@@ -750,7 +751,25 @@ void mobile_ui_system::draw( const SDL_Renderer_Ptr &renderer, Font *font )
         init();
     }
 
+    // Modo de posicionamento de gatilhos na tela (arrastar e soltar)
+    if( is_positioning_triggers ) {
+        draw_positioning_mode( renderer, font );
+        return;
+    }
+
     const bool gameplay_ready = is_gameplay_ready();
+
+    // Se estiver com esquema customizado ativo, desenha os gatilhos customizados
+    if( active_applied_scheme_idx > 0 && active_applied_scheme_idx < static_cast<int>( loaded_schemes.size() ) ) {
+        auto &scheme = loaded_schemes[active_applied_scheme_idx];
+        for( auto &trig : scheme.triggers ) {
+            trig.calculated_bounds.w = static_cast<int>( trig.size * density_scale );
+            trig.calculated_bounds.h = static_cast<int>( trig.size * density_scale );
+            trig.calculated_bounds.x = static_cast<int>( trig.x_pct * screen_width ) - trig.calculated_bounds.w / 2;
+            trig.calculated_bounds.y = static_cast<int>( trig.y_pct * screen_height ) - trig.calculated_bounds.h / 2;
+            draw_custom_trigger_button( renderer, font, trig, false );
+        }
+    }
 
     if( gameplay_ready ) {
         update_context_actions();
@@ -813,14 +832,36 @@ void mobile_ui_system::draw( const SDL_Renderer_Ptr &renderer, Font *font )
     // 5. Draw Settings Drawer se estiver aberto (Hub Marrom)
     if( settings_open ) {
         draw_settings_drawer( renderer, font );
+        if( trigger_config_modal_open ) {
+            draw_trigger_config_modal( renderer, font );
+        } else if( save_scheme_modal_open ) {
+            draw_save_scheme_modal( renderer, font );
+        }
     }
 }
 
 bool mobile_ui_system::handle_touch_down( float x, float y, int finger_id, uint32_t ticks )
 {
+    if( is_positioning_triggers ) {
+        return handle_positioning_touch_down( x, y, finger_id );
+    }
+
     if( settings_open ) {
         // Interceptado pelo Hub de configuracoes
         return true;
+    }
+
+    // Se estiver com esquema customizado ativo, checa toque nos gatilhos
+    if( active_applied_scheme_idx > 0 && active_applied_scheme_idx < static_cast<int>( loaded_schemes.size() ) ) {
+        auto &scheme = loaded_schemes[active_applied_scheme_idx];
+        for( auto &trig : scheme.triggers ) {
+            if( x >= trig.calculated_bounds.x && x <= trig.calculated_bounds.x + trig.calculated_bounds.w &&
+                y >= trig.calculated_bounds.y && y <= trig.calculated_bounds.y + trig.calculated_bounds.h ) {
+                trig.is_pressed = true;
+                trig.active_finger_id = finger_id;
+                return true;
+            }
+        }
     }
 
     const bool gameplay_ready = is_gameplay_ready();
@@ -895,6 +936,10 @@ bool mobile_ui_system::handle_touch_down( float x, float y, int finger_id, uint3
 
 bool mobile_ui_system::handle_touch_motion( float x, float y, int finger_id, uint32_t /*ticks*/ )
 {
+    if( is_positioning_triggers ) {
+        return handle_positioning_touch_motion( x, y, finger_id );
+    }
+
     if( settings_open ) {
         return true;
     }
@@ -938,8 +983,31 @@ bool mobile_ui_system::handle_touch_motion( float x, float y, int finger_id, uin
 bool mobile_ui_system::handle_touch_up( float x, float y, int finger_id, uint32_t ticks,
                                         input_event &out_event )
 {
+    if( is_positioning_triggers ) {
+        return handle_positioning_touch_up( x, y, finger_id );
+    }
+
     if( settings_open ) {
         return handle_settings_touch( x, y, out_event );
+    }
+
+    // Se estiver com esquema customizado ativo, dispara o gatilho tocado
+    if( active_applied_scheme_idx > 0 && active_applied_scheme_idx < static_cast<int>( loaded_schemes.size() ) ) {
+        auto &scheme = loaded_schemes[active_applied_scheme_idx];
+        for( auto &trig : scheme.triggers ) {
+            if( trig.is_pressed && trig.active_finger_id == finger_id ) {
+                trig.is_pressed = false;
+                trig.active_finger_id = -1;
+                if( !trig.keys.empty() ) {
+                    out_event = input_event( trig.keys[0], input_event_t::keyboard_char );
+                    pending_macro_events.clear();
+                    for( size_t k = 1; k < trig.keys.size(); ++k ) {
+                        pending_macro_events.push_back( input_event( trig.keys[k], input_event_t::keyboard_char ) );
+                    }
+                    return true;
+                }
+            }
+        }
     }
 
     const bool gameplay_ready = is_gameplay_ready();
@@ -1016,8 +1084,15 @@ bool mobile_ui_system::handle_touch_up( float x, float y, int finger_id, uint32_
 
 bool mobile_ui_system::handle_touch_repeat( uint32_t ticks, input_event &out_event )
 {
-    if( settings_open ) {
+    if( is_positioning_triggers || settings_open ) {
         return false;
+    }
+
+    // Despacha sequencialmente eventos pendentes de macro/combinacao de botoes
+    if( !pending_macro_events.empty() ) {
+        out_event = pending_macro_events.front();
+        pending_macro_events.erase( pending_macro_events.begin() );
+        return true;
     }
 
     if( analog_active && analog_current_direction_key != 0 ) {
@@ -1113,7 +1188,7 @@ void mobile_ui_system::draw_settings_drawer( const SDL_Renderer_Ptr &renderer, F
     std::array<std::string, 4> tab_labels = {
         _( "1. CONTROLES" ),
         _( "2. TELA/CORES" ),
-        _( "3. ATALHOS" ),
+        _( "3. ATALHOS & ESQUEMAS" ),
         _( "4. MODS" )
     };
 
@@ -1240,7 +1315,9 @@ void mobile_ui_system::draw_settings_drawer( const SDL_Renderer_Ptr &renderer, F
     if( settings_active_tab == 3 ) {
         draw_mods_tab( renderer, font );
     } else if( settings_active_tab == 2 ) {
-        // Aba 3: Instrucoes do Mod e Botao de Restaurar Padroes
+        draw_schemes_tab( renderer, font );
+    } else if( false ) {
+        // Aba de Instrucoes legada mantida como fallback
         int info_y = tab_y + tab_h + 20;
         font->OutputChar( renderer, _( "Instrucoes de Toque Puro (Touch-Native Android):" ), point( settings_box.x + 30, info_y ), 14 );
         font->OutputChar( renderer, _( "- Nao precisa digitar nada no teclado virtual (Gboard)!" ), point( settings_box.x + 30, info_y + 35 ), 15 );
@@ -1283,6 +1360,19 @@ bool mobile_ui_system::handle_settings_touch( float x, float y, input_event &/*o
             }
             return true;
         }
+    }
+
+    // Se os sub-modais de gatilho ou salvar esquema estiverem abertos
+    if( trigger_config_modal_open ) {
+        return handle_trigger_config_touch( x, y );
+    }
+    if( save_scheme_modal_open ) {
+        return handle_save_scheme_touch( x, y );
+    }
+
+    // Se estiver na Aba 3 (Atalhos & Esquemas), processa os toques de esquemas
+    if( settings_active_tab == 2 ) {
+        return handle_schemes_tab_touch( x, y );
     }
 
     // Se estiver na Aba 4 (Mods), processa os toques de mods
@@ -1966,6 +2056,1359 @@ bool mobile_ui_system::handle_mods_tab_touch( float x, float y )
         }
     }
 
+    return true;
+}
+
+
+// ============================================================================
+// SISTEMA DE ESQUEMAS DE INTERFACE E GATILHOS PERSONALIZADOS
+// ============================================================================
+
+void mobile_ui_system::draw_custom_trigger_button( const SDL_Renderer_Ptr &renderer, Font *font, const custom_trigger &trig, bool highlight )
+{
+    SetRenderDrawBlendMode( renderer, SDL_BLENDMODE_BLEND );
+
+    Uint8 a_bg = static_cast<Uint8>( std::clamp( trig.opacity * 255.0f, 30.0f, 255.0f ) );
+    Uint8 a_border = static_cast<Uint8>( std::min( 255.0f, a_bg * 1.25f ) );
+
+    // Paletas de cores tematicas
+    Uint8 r_bg = 25, g_bg = 45, b_bg = 80;
+    Uint8 r_bd = 50, g_bd = 140, b_bd = 240;
+
+    switch( trig.color_theme ) {
+        case 1: // Verde Sobrevivencia
+            r_bg = 20; g_bg = 60; b_bg = 35;
+            r_bd = 40; g_bd = 190; b_bd = 90;
+            break;
+        case 2: // Vermelho Alerta / Combate
+            r_bg = 75; g_bg = 25; b_bg = 25;
+            r_bd = 220; g_bd = 60; b_bd = 50;
+            break;
+        case 3: // Dourado / Ambar
+            r_bg = 70; g_bg = 55; b_bg = 15;
+            r_bd = 230; g_bd = 180; b_bd = 40;
+            break;
+        case 4: // Cinza Aco Metalico
+            r_bg = 35; g_bg = 40; b_bg = 48;
+            r_bd = 140; g_bd = 150; b_bd = 165;
+            break;
+        case 5: // Roxo Arcano
+            r_bg = 55; g_bg = 25; b_bg = 75;
+            r_bd = 180; g_bd = 70; b_bd = 230;
+            break;
+        case 0: // Azul Tatil (Padrao)
+        default:
+            r_bg = 25; g_bg = 45; b_bg = 80;
+            r_bd = 50; g_bd = 140; b_bd = 240;
+            break;
+    }
+
+    if( trig.is_pressed ) {
+        r_bg = std::min( 255, r_bg + 60 );
+        g_bg = std::min( 255, g_bg + 60 );
+        b_bg = std::min( 255, b_bg + 60 );
+    }
+
+    // Fundo do botao
+    SetRenderDrawColor( renderer, r_bg, g_bg, b_bg, a_bg );
+    RenderFillRect( renderer, &trig.calculated_bounds );
+
+    // Borda
+    SetRenderDrawColor( renderer, r_bd, g_bd, b_bd, a_border );
+    RenderDrawRect( renderer, &trig.calculated_bounds );
+
+    // Destaque pulsante no modo de posicionamento
+    if( highlight ) {
+        SDL_Rect hl_rect = {
+            trig.calculated_bounds.x - 3,
+            trig.calculated_bounds.y - 3,
+            trig.calculated_bounds.w + 6,
+            trig.calculated_bounds.h + 6
+        };
+        SetRenderDrawColor( renderer, 255, 215, 0, 255 ); // Dourado brilhante
+        RenderDrawRect( renderer, &hl_rect );
+        SDL_Rect hl_rect2 = {
+            trig.calculated_bounds.x - 5,
+            trig.calculated_bounds.y - 5,
+            trig.calculated_bounds.w + 10,
+            trig.calculated_bounds.h + 10
+        };
+        SetRenderDrawColor( renderer, 100, 200, 255, 180 );
+        RenderDrawRect( renderer, &hl_rect2 );
+    }
+
+    // Rotulo central
+    if( font ) {
+        std::string lbl = trig.label;
+        if( utf8_width( lbl ) > 6 ) {
+            lbl = lbl.substr( 0, 5 ) + ".";
+        }
+        int tx = trig.calculated_bounds.x + ( trig.calculated_bounds.w - ( font->width * utf8_width( lbl ) ) ) / 2;
+        int ty = trig.calculated_bounds.y + ( trig.calculated_bounds.h - font->height ) / 2;
+        font->OutputChar( renderer, lbl, point( tx, ty ), 15, 1.0f );
+    }
+
+    SetRenderDrawBlendMode( renderer, SDL_BLENDMODE_NONE );
+}
+
+void mobile_ui_system::load_all_schemes()
+{
+    loaded_schemes.clear();
+
+    // 1. Esquema Padrao Oficial
+    interface_scheme def_scheme;
+    def_scheme.id = "padrao";
+    def_scheme.name = _( "Esquema Padrao (Oficial)" );
+    def_scheme.description = _( "Layout de fabrica oficial com D-Pad e cluster ergonomico de combate e sobrevivencia." );
+    def_scheme.is_default = true;
+    loaded_schemes.push_back( def_scheme );
+
+    std::vector<std::string> search_dirs;
+    search_dirs.push_back( PATH_INFO::user_dir() + "schemes/" );
+    search_dirs.push_back( "/storage/emulated/0/Documents/CataclysmDDA/schemes/" );
+
+    std::set<std::string> seen_scheme_ids;
+    seen_scheme_ids.insert( "padrao" );
+
+    for( const auto &dir_path : search_dirs ) {
+        if( !dir_exist( dir_path ) ) {
+            continue;
+        }
+
+        try {
+            for( const auto &entry : std::filesystem::directory_iterator( std::filesystem::u8path( dir_path ) ) ) {
+                if( !entry.is_regular_file() || entry.path().extension().u8string() != ".json" ) {
+                    continue;
+                }
+
+                std::string file_path = entry.path().u8string();
+                std::string stem = entry.path().stem().u8string();
+
+                if( seen_scheme_ids.count( stem ) > 0 ) {
+                    continue;
+                }
+
+                interface_scheme s;
+                s.id = stem;
+                s.name = ( stem == "esquema_atual_temporario" ) ? _( "Temporario (Auto-Salvo)" ) : stem;
+                s.description = _( "Esquema customizado de gatilhos tatil." );
+                s.is_default = false;
+
+                try {
+                    read_from_file_json( cata_path::create_from_utf8( file_path ), [&]( const JsonValue &jv ) {
+                        JsonObject jo = jv.get_object();
+                        jo.allow_omitted_members();
+                        if( jo.has_string( "name" ) ) {
+                            s.name = jo.get_string( "name" );
+                        }
+                        if( jo.has_string( "description" ) ) {
+                            s.description = jo.get_string( "description" );
+                        }
+                        if( jo.has_array( "triggers" ) ) {
+                            for( const JsonValue tv : jo.get_array( "triggers" ) ) {
+                                JsonObject to = tv.get_object();
+                                to.allow_omitted_members();
+                                custom_trigger trig;
+                                if( to.has_string( "id" ) ) trig.id = to.get_string( "id" );
+                                if( to.has_string( "label" ) ) trig.label = to.get_string( "label" );
+                                if( to.has_float( "x_pct" ) ) trig.x_pct = to.get_float( "x_pct" );
+                                if( to.has_float( "y_pct" ) ) trig.y_pct = to.get_float( "y_pct" );
+                                if( to.has_int( "size" ) ) trig.size = to.get_int( "size" );
+                                if( to.has_float( "opacity" ) ) trig.opacity = to.get_float( "opacity" );
+                                if( to.has_int( "color_theme" ) ) trig.color_theme = to.get_int( "color_theme" );
+                                if( to.has_array( "keys" ) ) {
+                                    for( int k : to.get_array( "keys" ) ) {
+                                        trig.keys.push_back( k );
+                                    }
+                                }
+                                s.triggers.push_back( trig );
+                            }
+                        }
+                    } );
+                } catch( ... ) {}
+
+                seen_scheme_ids.insert( stem );
+                loaded_schemes.push_back( s );
+            }
+        } catch( ... ) {}
+    }
+
+    if( selected_scheme_idx >= static_cast<int>( loaded_schemes.size() ) ) {
+        selected_scheme_idx = 0;
+    }
+}
+
+void mobile_ui_system::save_scheme_to_disk( const interface_scheme &scheme )
+{
+    std::string internal_dir = PATH_INFO::user_dir() + "schemes/";
+    std::string public_dir = "/storage/emulated/0/Documents/CataclysmDDA/schemes/";
+
+    std::error_code ec;
+    std::filesystem::create_directories( std::filesystem::u8path( internal_dir ), ec );
+    std::filesystem::create_directories( std::filesystem::u8path( public_dir ), ec );
+
+    std::string file_name = scheme.id + ".json";
+    std::string file_path = internal_dir + file_name;
+
+    write_to_file( cata_path::create_from_utf8( file_path ), [&]( std::ostream &fout ) {
+        JsonOut json( fout, true );
+        json.start_object();
+        json.member( "id", scheme.id );
+        json.member( "name", scheme.name );
+        json.member( "description", scheme.description );
+        json.member( "triggers" );
+        json.start_array();
+        for( const auto &trig : scheme.triggers ) {
+            json.start_object();
+            json.member( "id", trig.id );
+            json.member( "label", trig.label );
+            json.member( "x_pct", trig.x_pct );
+            json.member( "y_pct", trig.y_pct );
+            json.member( "size", trig.size );
+            json.member( "opacity", trig.opacity );
+            json.member( "color_theme", trig.color_theme );
+            json.member( "keys" );
+            json.start_array();
+            for( int k : trig.keys ) {
+                json.write( k );
+            }
+            json.end_array();
+            json.end_object();
+        }
+        json.end_array();
+        json.end_object();
+    } );
+
+    // Copia de seguranca para a pasta publica de Documentos
+    try {
+        std::filesystem::copy_file( std::filesystem::u8path( file_path ),
+                                    std::filesystem::u8path( public_dir + file_name ),
+                                    std::filesystem::copy_options::overwrite_existing, ec );
+    } catch( ... ) {}
+}
+
+void mobile_ui_system::save_current_as_temporary()
+{
+    if( selected_scheme_idx <= 0 || selected_scheme_idx >= static_cast<int>( loaded_schemes.size() ) ) {
+        return;
+    }
+
+    auto &current = loaded_schemes[selected_scheme_idx];
+    interface_scheme temp = current;
+    temp.id = "esquema_atual_temporario";
+    temp.name = _( "Temporario (Auto-Salvo)" );
+    temp.is_default = false;
+
+    save_scheme_to_disk( temp );
+}
+
+void mobile_ui_system::delete_scheme_from_disk( size_t index )
+{
+    if( index == 0 || index >= loaded_schemes.size() ) {
+        return; // Nao exclui o esquema padrao
+    }
+
+    std::string id = loaded_schemes[index].id;
+    std::string internal_file = PATH_INFO::user_dir() + "schemes/" + id + ".json";
+    std::string public_file = "/storage/emulated/0/Documents/CataclysmDDA/schemes/" + id + ".json";
+
+    std::error_code ec;
+    std::filesystem::remove( std::filesystem::u8path( internal_file ), ec );
+    std::filesystem::remove( std::filesystem::u8path( public_file ), ec );
+
+    if( active_applied_scheme_idx == static_cast<int>( index ) ) {
+        active_applied_scheme_idx = 0; // Volta para o padrao se excluiu o ativo
+    }
+
+    load_all_schemes();
+    selected_scheme_idx = 0;
+    schemes_feedback_msg = _( "Esquema excluido com sucesso." );
+}
+
+void mobile_ui_system::apply_scheme( size_t index )
+{
+    if( index >= loaded_schemes.size() ) {
+        return;
+    }
+
+    active_applied_scheme_idx = static_cast<int>( index );
+    schemes_feedback_msg = string_format( _( "Esquema '%s' ativado no jogo!" ), loaded_schemes[index].name );
+}
+
+// ============================================================================
+// DESENHO DA ABA DE ATALHOS & ESQUEMAS (DESIGN ESTILO CIVILOPEDIA / 2 COLUNAS)
+// ============================================================================
+
+void mobile_ui_system::draw_schemes_tab( const SDL_Renderer_Ptr &renderer, Font *font )
+{
+    int tab_y = settings_box.y + 60;
+    int tab_h = 42;
+    int content_y = tab_y + tab_h + 12;
+    int content_h = ( settings_box.y + settings_box.h - 20 ) - content_y;
+
+    // Coluna Esquerda: Lista de Esquemas (Largura ~270px)
+    int col_left_w = std::min( 270, settings_box.w / 3 );
+    SDL_Rect col_left = { settings_box.x + 18, content_y, col_left_w, content_h };
+
+    SetRenderDrawColor( renderer, 10, 16, 28, 230 );
+    RenderFillRect( renderer, &col_left );
+    SetRenderDrawColor( renderer, 25, 42, 70, 255 );
+    RenderDrawRect( renderer, &col_left );
+
+    // Botao no topo da coluna esquerda: [ + NOVO ESQUEMA ]
+    schemes_btn_new_scheme = { col_left.x + 8, col_left.y + 8, col_left.w - 16, 38 };
+    SetRenderDrawColor( renderer, 20, 90, 140, 240 );
+    RenderFillRect( renderer, &schemes_btn_new_scheme );
+    SetRenderDrawColor( renderer, 40, 180, 240, 255 );
+    RenderDrawRect( renderer, &schemes_btn_new_scheme );
+
+    std::string new_sch_lbl = _( "+ NOVO ESQUEMA" );
+    int ns_x = schemes_btn_new_scheme.x + ( schemes_btn_new_scheme.w - ( font->width * utf8_width( new_sch_lbl ) ) ) / 2;
+    int ns_y = schemes_btn_new_scheme.y + ( schemes_btn_new_scheme.h - font->height ) / 2;
+    font->OutputChar( renderer, new_sch_lbl, point( ns_x, ns_y ), 11 );
+
+    // Lista de cards de esquemas (Cards estilo Civilopedia com circulo branco a esquerda)
+    int card_y = schemes_btn_new_scheme.y + schemes_btn_new_scheme.h + 8;
+    int card_h = 46;
+    int card_gap = 6;
+    int max_visible_cards = ( col_left.y + col_left.h - card_y - 40 ) / ( card_h + card_gap );
+
+    schemes_cards_rects.clear();
+    int start_s_idx = std::clamp( scheme_list_scroll_offset, 0, std::max( 0, static_cast<int>( loaded_schemes.size() ) - 1 ) );
+    int end_s_idx = std::min( start_s_idx + std::max( 1, max_visible_cards ), static_cast<int>( loaded_schemes.size() ) );
+
+    for( int i = start_s_idx; i < end_s_idx; ++i ) {
+        int cy = card_y + ( i - start_s_idx ) * ( card_h + card_gap );
+        SDL_Rect card_rect = { col_left.x + 8, cy, col_left.w - 16, card_h };
+        schemes_cards_rects.push_back( card_rect );
+
+        bool is_selected = ( i == selected_scheme_idx );
+        bool is_active = ( i == active_applied_scheme_idx );
+
+        // Fundo do card (Azul Royal eletrico se selecionado, como o Lancer no print)
+        if( is_selected ) {
+            SetRenderDrawColor( renderer, 25, 55, 145, 255 ); // Azul Royal Vibrante
+            RenderFillRect( renderer, &card_rect );
+            SetRenderDrawColor( renderer, 80, 160, 255, 255 ); // Borda luminosa
+            RenderDrawRect( renderer, &card_rect );
+        } else {
+            SetRenderDrawColor( renderer, 18, 28, 46, 200 );
+            RenderFillRect( renderer, &card_rect );
+            SetRenderDrawColor( renderer, 35, 52, 80, 255 );
+            RenderDrawRect( renderer, &card_rect );
+        }
+
+        // Circulo branco a esquerda do card (fiel a imagem)
+        SDL_Rect icon_circle = { card_rect.x + 8, card_rect.y + ( card_h - 26 ) / 2, 26, 26 };
+        SetRenderDrawColor( renderer, 240, 245, 255, 255 );
+        RenderFillRect( renderer, &icon_circle );
+        SetRenderDrawColor( renderer, 40, 80, 160, 255 );
+        RenderDrawRect( renderer, &icon_circle );
+
+        // Letra inicial no circulo
+        std::string init_letter = loaded_schemes[i].name.substr( 0, 1 );
+        int il_x = icon_circle.x + ( icon_circle.w - font->width ) / 2;
+        int il_y = icon_circle.y + ( icon_circle.h - font->height ) / 2;
+        font->OutputChar( renderer, init_letter, point( il_x, il_y ), 0 ); // Texto escuro no circulo branco
+
+        // Nome do esquema
+        std::string s_name = loaded_schemes[i].name;
+        if( utf8_width( s_name ) > 15 ) {
+            s_name = s_name.substr( 0, 14 ) + "..";
+        }
+        int sn_x = card_rect.x + 42;
+        int sn_y = card_rect.y + 8;
+        font->OutputChar( renderer, s_name, point( sn_x, sn_y ), is_selected ? 11 : 15 );
+
+        // Tag [ATIVO] se estiver em uso no jogo
+        if( is_active ) {
+            font->OutputChar( renderer, _( "[ATIVO]" ), point( sn_x, card_rect.y + 26 ), 10 );
+        } else {
+            std::string trig_cnt = string_format( _( "%d gatilhos" ), static_cast<int>( loaded_schemes[i].triggers.size() ) );
+            font->OutputChar( renderer, trig_cnt, point( sn_x, card_rect.y + 26 ), 14 );
+        }
+    }
+
+    // Botoes de rolagem da lista de esquemas
+    int foot_y = col_left.y + col_left.h - 34;
+    schemes_btn_scroll_up = { col_left.x + 8, foot_y, ( col_left.w - 20 ) / 2, 28 };
+    schemes_btn_scroll_down = { schemes_btn_scroll_up.x + schemes_btn_scroll_up.w + 4, foot_y, ( col_left.w - 20 ) / 2, 28 };
+
+    SetRenderDrawColor( renderer, 30, 42, 60, 220 );
+    RenderFillRect( renderer, &schemes_btn_scroll_up );
+    RenderFillRect( renderer, &schemes_btn_scroll_down );
+    SetRenderDrawColor( renderer, 60, 85, 120, 255 );
+    RenderDrawRect( renderer, &schemes_btn_scroll_up );
+    RenderDrawRect( renderer, &schemes_btn_scroll_down );
+
+    font->OutputChar( renderer, "^", point( schemes_btn_scroll_up.x + ( schemes_btn_scroll_up.w - font->width ) / 2, foot_y + 6 ), 15 );
+    font->OutputChar( renderer, "v", point( schemes_btn_scroll_down.x + ( schemes_btn_scroll_down.w - font->width ) / 2, foot_y + 6 ), 15 );
+
+    // ========================================================================
+    // COLUNA DIREITA: Painel Detalhado (Inspirado no Painel do Lancer do print)
+    // ========================================================================
+    int col_right_x = col_left.x + col_left.w + 14;
+    int col_right_w = ( settings_box.x + settings_box.w - 18 ) - col_right_x;
+    SDL_Rect col_right = { col_right_x, content_y, col_right_w, content_h };
+
+    SetRenderDrawColor( renderer, 12, 18, 32, 230 );
+    RenderFillRect( renderer, &col_right );
+    SetRenderDrawColor( renderer, 25, 42, 70, 255 );
+    RenderDrawRect( renderer, &col_right );
+
+    if( selected_scheme_idx < 0 || selected_scheme_idx >= static_cast<int>( loaded_schemes.size() ) ) {
+        return;
+    }
+
+    auto &cur_scheme = loaded_schemes[selected_scheme_idx];
+
+    // Cabecalho do Painel: Circulo branco grande + Titulo destacado
+    int head_y = col_right.y + 14;
+    SDL_Rect big_circle = { col_right.x + 18, head_y, 38, 38 };
+    SetRenderDrawColor( renderer, 240, 245, 255, 255 );
+    RenderFillRect( renderer, &big_circle );
+    SetRenderDrawColor( renderer, 60, 120, 220, 255 );
+    RenderDrawRect( renderer, &big_circle );
+
+    // Icone central do cabecalho
+    font->OutputChar( renderer, "*", point( big_circle.x + ( big_circle.w - font->width ) / 2, big_circle.y + ( big_circle.h - font->height ) / 2 ), 0 );
+
+    // Titulo do Esquema
+    int title_x = big_circle.x + big_circle.w + 14;
+    font->OutputChar( renderer, cur_scheme.name, point( title_x, head_y + 10 ), 11 );
+
+    // Linha separadora horizontal estilizada dourada (exatamente como no print abaixo de Lancer!)
+    SDL_Rect sep_line = { col_right.x + 18, head_y + 46, col_right.w - 36, 2 };
+    SetRenderDrawColor( renderer, 190, 160, 80, 220 ); // Dourado nobre
+    RenderFillRect( renderer, &sep_line );
+
+    // Informacoes e Status em topicos limpos
+    int info_y = sep_line.y + 12;
+    std::string desc_str = cur_scheme.description;
+    font->OutputChar( renderer, desc_str, point( col_right.x + 18, info_y ), 15 );
+
+    std::string stat_str = string_format( _( "Total de Gatilhos: %d  |  Status: %s" ),
+        static_cast<int>( cur_scheme.triggers.size() ),
+        ( selected_scheme_idx == active_applied_scheme_idx ) ? _( "[ATIVO NO JOGO]" ) : _( "[NAO APLICADO]" ) );
+    font->OutputChar( renderer, stat_str, point( col_right.x + 18, info_y + 24 ), 14 );
+
+    // Mensagem de feedback se houver
+    if( !schemes_feedback_msg.empty() ) {
+        font->OutputChar( renderer, schemes_feedback_msg, point( col_right.x + 18, info_y + 46 ), 10 );
+    }
+
+    // Barra de Botoes de Acao Horizontais
+    int actions_y = info_y + 68;
+    int btn_h = 36;
+    int act_gap = 8;
+    int btn_w = ( col_right.w - 36 - ( act_gap * 4 ) ) / 5;
+
+    scheme_btn_apply = { col_right.x + 18, actions_y, btn_w, btn_h };
+    scheme_btn_add_trigger = { scheme_btn_apply.x + btn_w + act_gap, actions_y, btn_w, btn_h };
+    scheme_btn_position_screen = { scheme_btn_add_trigger.x + btn_w + act_gap, actions_y, btn_w, btn_h };
+    scheme_btn_save_as = { scheme_btn_position_screen.x + btn_w + act_gap, actions_y, btn_w, btn_h };
+    scheme_btn_delete = { scheme_btn_save_as.x + btn_w + act_gap, actions_y, btn_w, btn_h };
+
+    // Botao 1: [ APLICAR ]
+    bool is_cur_active = ( selected_scheme_idx == active_applied_scheme_idx );
+    SetRenderDrawColor( renderer, is_cur_active ? 20 : 35, is_cur_active ? 120 : 70, is_cur_active ? 70 : 160, 240 );
+    RenderFillRect( renderer, &scheme_btn_apply );
+    SetRenderDrawColor( renderer, 70, 180, 255, 255 );
+    RenderDrawRect( renderer, &scheme_btn_apply );
+    std::string app_lbl = is_cur_active ? _( "EM USO" ) : _( "APLICAR" );
+    int ax = scheme_btn_apply.x + ( scheme_btn_apply.w - ( font->width * utf8_width( app_lbl ) ) ) / 2;
+    int ay = scheme_btn_apply.y + ( scheme_btn_apply.h - font->height ) / 2;
+    font->OutputChar( renderer, app_lbl, point( ax, ay ), 15 );
+
+    // Botao 2: [ + GATILHO ]
+    SetRenderDrawColor( renderer, 20, 100, 150, 240 );
+    RenderFillRect( renderer, &scheme_btn_add_trigger );
+    SetRenderDrawColor( renderer, 50, 200, 255, 255 );
+    RenderDrawRect( renderer, &scheme_btn_add_trigger );
+    std::string add_lbl = _( "+ GATILHO" );
+    int gx = scheme_btn_add_trigger.x + ( scheme_btn_add_trigger.w - ( font->width * utf8_width( add_lbl ) ) ) / 2;
+    int gy = scheme_btn_add_trigger.y + ( scheme_btn_add_trigger.h - font->height ) / 2;
+    font->OutputChar( renderer, add_lbl, point( gx, gy ), 11 );
+
+    // Botao 3: [ POSICIONAR ]
+    SetRenderDrawColor( renderer, 160, 110, 25, 240 ); // Ambar / Ouro
+    RenderFillRect( renderer, &scheme_btn_position_screen );
+    SetRenderDrawColor( renderer, 255, 200, 50, 255 );
+    RenderDrawRect( renderer, &scheme_btn_position_screen );
+    std::string pos_lbl = _( "POSICIONAR" );
+    int pox = scheme_btn_position_screen.x + ( scheme_btn_position_screen.w - ( font->width * utf8_width( pos_lbl ) ) ) / 2;
+    int poy = scheme_btn_position_screen.y + ( scheme_btn_position_screen.h - font->height ) / 2;
+    font->OutputChar( renderer, pos_lbl, point( pox, poy ), 11 );
+
+    // Botao 4: [ SALVAR ]
+    SetRenderDrawColor( renderer, 45, 60, 80, 240 );
+    RenderFillRect( renderer, &scheme_btn_save_as );
+    SetRenderDrawColor( renderer, 100, 140, 180, 255 );
+    RenderDrawRect( renderer, &scheme_btn_save_as );
+    std::string sav_lbl = _( "SALVAR" );
+    int sx = scheme_btn_save_as.x + ( scheme_btn_save_as.w - ( font->width * utf8_width( sav_lbl ) ) ) / 2;
+    int sy = scheme_btn_save_as.y + ( scheme_btn_save_as.h - font->height ) / 2;
+    font->OutputChar( renderer, sav_lbl, point( sx, sy ), 15 );
+
+    // Botao 5: [ EXCLUIR ]
+    bool can_delete = !cur_scheme.is_default;
+    SetRenderDrawColor( renderer, can_delete ? 140 : 40, can_delete ? 30 : 40, can_delete ? 30 : 40, can_delete ? 240 : 120 );
+    RenderFillRect( renderer, &scheme_btn_delete );
+    SetRenderDrawColor( renderer, can_delete ? 220 : 60, can_delete ? 60 : 60, can_delete ? 60 : 60, 255 );
+    RenderDrawRect( renderer, &scheme_btn_delete );
+    std::string del_lbl = _( "EXCLUIR" );
+    int dx = scheme_btn_delete.x + ( scheme_btn_delete.w - ( font->width * utf8_width( del_lbl ) ) ) / 2;
+    int dy = scheme_btn_delete.y + ( scheme_btn_delete.h - font->height ) / 2;
+    font->OutputChar( renderer, del_lbl, point( dx, dy ), can_delete ? 15 : 14 );
+
+    // ========================================================================
+    // Lista de Gatilhos Configurados deste Esquema
+    // ========================================================================
+    int t_list_y = actions_y + btn_h + 14;
+    int t_card_h = 44;
+    int t_gap = 6;
+    int visible_t_count = ( col_right.y + col_right.h - t_list_y - 10 ) / ( t_card_h + t_gap );
+
+    trigger_item_delete_rects.clear();
+
+    if( cur_scheme.triggers.empty() ) {
+        font->OutputChar( renderer, _( "Nenhum gatilho customizado neste esquema." ), point( col_right.x + 24, t_list_y + 20 ), 14 );
+        font->OutputChar( renderer, _( "Toque em [+ GATILHO] acima para adicionar botoes personalizados a tela!" ), point( col_right.x + 24, t_list_y + 44 ), 11 );
+    } else {
+        int start_t_idx = std::clamp( trigger_list_scroll_offset, 0, std::max( 0, static_cast<int>( cur_scheme.triggers.size() ) - 1 ) );
+        int end_t_idx = std::min( start_t_idx + std::max( 1, visible_t_count ), static_cast<int>( cur_scheme.triggers.size() ) );
+
+        for( int i = start_t_idx; i < end_t_idx; ++i ) {
+            auto &trig = cur_scheme.triggers[i];
+            int ty_pos = t_list_y + ( i - start_t_idx ) * ( t_card_h + t_gap );
+
+            SDL_Rect t_card = { col_right.x + 18, ty_pos, col_right.w - 36, t_card_h };
+            SetRenderDrawColor( renderer, 20, 28, 44, 220 );
+            RenderFillRect( renderer, &t_card );
+            SetRenderDrawColor( renderer, 40, 60, 90, 255 );
+            RenderDrawRect( renderer, &t_card );
+
+            // Miniatura visual do botao com sua cor real
+            SDL_Rect mini_box = { t_card.x + 8, t_card.y + 6, 48, t_card_h - 12 };
+            Uint8 r_bg = 25, g_bg = 45, b_bg = 80;
+            if( trig.color_theme == 1 ) { r_bg = 20; g_bg = 60; b_bg = 35; }
+            else if( trig.color_theme == 2 ) { r_bg = 75; g_bg = 25; b_bg = 25; }
+            else if( trig.color_theme == 3 ) { r_bg = 70; g_bg = 55; b_bg = 15; }
+            else if( trig.color_theme == 4 ) { r_bg = 35; g_bg = 40; b_bg = 48; }
+            else if( trig.color_theme == 5 ) { r_bg = 55; g_bg = 25; b_bg = 75; }
+
+            SetRenderDrawColor( renderer, r_bg, g_bg, b_bg, 255 );
+            RenderFillRect( renderer, &mini_box );
+            SetRenderDrawColor( renderer, 180, 200, 230, 255 );
+            RenderDrawRect( renderer, &mini_box );
+
+            font->OutputChar( renderer, trig.label.substr( 0, 4 ), point( mini_box.x + 4, mini_box.y + 6 ), 15 );
+
+            // Descricao das teclas e posicoes
+            std::string keys_str = _( "Teclas: " );
+            for( size_t k = 0; k < trig.keys.size(); ++k ) {
+                if( k > 0 ) keys_str += " + ";
+                int key_val = trig.keys[k];
+                if( key_val >= 32 && key_val <= 126 ) {
+                    keys_str += std::string( 1, static_cast<char>( key_val ) );
+                } else if( key_val == '\n' || key_val == KEY_ENTER ) {
+                    keys_str += "ENTER";
+                } else if( key_val == 27 ) {
+                    keys_str += "ESC";
+                } else {
+                    keys_str += string_format( "#%d", key_val );
+                }
+            }
+
+            int text_x = mini_box.x + mini_box.w + 14;
+            font->OutputChar( renderer, keys_str, point( text_x, t_card.y + 6 ), 11 );
+
+            std::string geom_str = string_format( _( "Posicao: (%d%%, %d%%)  |  Tamanho: %dpx  |  Opacidade: %d%%" ),
+                static_cast<int>( trig.x_pct * 100.0f ),
+                static_cast<int>( trig.y_pct * 100.0f ),
+                trig.size,
+                static_cast<int>( trig.opacity * 100.0f ) );
+            font->OutputChar( renderer, geom_str, point( text_x, t_card.y + 24 ), 14 );
+
+            // Botao [ X ] de excluir gatilho
+            SDL_Rect del_btn = { t_card.x + t_card.w - 38, t_card.y + 6, 30, t_card_h - 12 };
+            trigger_item_delete_rects.push_back( del_btn );
+
+            SetRenderDrawColor( renderer, 150, 35, 35, 230 );
+            RenderFillRect( renderer, &del_btn );
+            SetRenderDrawColor( renderer, 220, 70, 70, 255 );
+            RenderDrawRect( renderer, &del_btn );
+            font->OutputChar( renderer, "X", point( del_btn.x + 10, del_btn.y + 6 ), 15 );
+        }
+    }
+}
+
+// ============================================================================
+// MODAL DE CONFIGURACAO DE GATILHO (CATALOGO COMPLETO DE 120 TECLAS)
+// ============================================================================
+
+void mobile_ui_system::draw_trigger_config_modal( const SDL_Renderer_Ptr &renderer, Font *font )
+{
+    SetRenderDrawBlendMode( renderer, SDL_BLENDMODE_BLEND );
+
+    // Fundo escuro modal de sobreposicao
+    SDL_Rect overlay = { 0, 0, screen_width, screen_height };
+    SetRenderDrawColor( renderer, 5, 8, 15, 215 );
+    RenderFillRect( renderer, &overlay );
+
+    // Caixa central
+    int m_w = std::min( 920, static_cast<int>( screen_width * 0.94f ) );
+    int m_h = std::min( 620, static_cast<int>( screen_height * 0.94f ) );
+    SDL_Rect modal_box = { ( screen_width - m_w ) / 2, ( screen_height - m_h ) / 2, m_w, m_h };
+
+    SetRenderDrawColor( renderer, 12, 18, 30, 255 );
+    RenderFillRect( renderer, &modal_box );
+    SetRenderDrawColor( renderer, 40, 120, 220, 255 );
+    RenderDrawRect( renderer, &modal_box );
+
+    // Titulo
+    int ty = modal_box.y + 14;
+    std::string m_title = _( "CONFIGURAR GATILHO TATIL (TECLADO COMPLETO & FUNCOES)" );
+    font->OutputChar( renderer, m_title, point( modal_box.x + 22, ty ), 11 );
+
+    // Previa em tempo real
+    temp_editing_trigger.calculated_bounds = { modal_box.x + modal_box.w - 110, modal_box.y + 14, 80, 80 };
+    draw_custom_trigger_button( renderer, font, temp_editing_trigger, true );
+
+    // Resumo das teclas ja atribuidas
+    std::string assigned_str = _( "Funcoes / Teclas Atribuidas: " );
+    if( temp_editing_trigger.keys.empty() ) {
+        assigned_str += _( "[ Nenhuma tecla atribuida - Toque em uma tecla abaixo ]" );
+    } else {
+        for( size_t i = 0; i < temp_editing_trigger.keys.size(); ++i ) {
+            if( i > 0 ) assigned_str += " + ";
+            int k = temp_editing_trigger.keys[i];
+            if( k >= 32 && k <= 126 ) {
+                assigned_str += std::string( "'" ) + static_cast<char>( k ) + "'";
+            } else if( k == '\n' || k == KEY_ENTER ) {
+                assigned_str += "ENTER";
+            } else if( k == 27 ) {
+                assigned_str += "ESC";
+            } else {
+                assigned_str += string_format( "K#%d", k );
+            }
+        }
+    }
+    font->OutputChar( renderer, assigned_str, point( modal_box.x + 22, ty + 30 ), 15 );
+
+    // Rotulos rapidos
+    int lbl_y = ty + 56;
+    font->OutputChar( renderer, _( "Rotulo Rapido:" ), point( modal_box.x + 22, lbl_y + 4 ), 14 );
+    std::vector<std::string> quick_labels = { "TIRO", "INV", "RECARGA", "OLHAR", "MAPA", "ESPERAR", "ENTER", "ESC", "C1", "C2" };
+    int qx = modal_box.x + 130;
+    for( const auto &ql : quick_labels ) {
+        SDL_Rect q_btn = { qx, lbl_y, static_cast<int>( font->width * utf8_width( ql ) + 14 ), 26 };
+        SetRenderDrawColor( renderer, 25, 40, 65, 240 );
+        RenderFillRect( renderer, &q_btn );
+        SetRenderDrawColor( renderer, 60, 95, 145, 255 );
+        RenderDrawRect( renderer, &q_btn );
+        font->OutputChar( renderer, ql, point( q_btn.x + 7, q_btn.y + 4 ), 15 );
+        qx += q_btn.w + 6;
+    }
+
+    // Abas de categorias do teclado completo
+    int cat_y = lbl_y + 34;
+    std::array<std::string, 6> cat_names = {
+        _( "[ a-z ]" ),
+        _( "[ A-Z ]" ),
+        _( "[ 0-9 ]" ),
+        _( "[ SIMBOLOS ]" ),
+        _( "[ SISTEMA & SETAS ]" ),
+        _( "[ F1-F12 ]" )
+    };
+
+    int cat_w = ( modal_box.w - 44 - 30 ) / 6;
+    for( int i = 0; i < 6; ++i ) {
+        SDL_Rect cat_btn = { modal_box.x + 22 + i * ( cat_w + 6 ), cat_y, cat_w, 32 };
+        bool is_c_active = ( trigger_keyboard_category == i );
+        SetRenderDrawColor( renderer, is_c_active ? 25 : 18, is_c_active ? 70 : 30, is_c_active ? 130 : 50, 240 );
+        RenderFillRect( renderer, &cat_btn );
+        SetRenderDrawColor( renderer, is_c_active ? 60 : 40, is_c_active ? 160 : 70, is_c_active ? 255 : 100, 255 );
+        RenderDrawRect( renderer, &cat_btn );
+
+        int tx = cat_btn.x + ( cat_btn.w - ( font->width * utf8_width( cat_names[i] ) ) ) / 2;
+        int tky = cat_btn.y + ( cat_btn.h - font->height ) / 2;
+        font->OutputChar( renderer, cat_names[i], point( tx, tky ), is_c_active ? 11 : 15 );
+    }
+
+    // Grid de teclas da categoria selecionada
+    int grid_y = cat_y + 40;
+    std::vector<std::pair<int, std::string>> current_keys;
+
+    if( trigger_keyboard_category == 0 ) {
+        // a-z
+        for( char c = 'a'; c <= 'z'; ++c ) {
+            current_keys.push_back( { static_cast<int>( c ), std::string( 1, c ) } );
+        }
+    } else if( trigger_keyboard_category == 1 ) {
+        // A-Z
+        for( char c = 'A'; c <= 'Z'; ++c ) {
+            current_keys.push_back( { static_cast<int>( c ), std::string( 1, c ) } );
+        }
+    } else if( trigger_keyboard_category == 2 ) {
+        // 0-9
+        for( char c = '0'; c <= '9'; ++c ) {
+            current_keys.push_back( { static_cast<int>( c ), std::string( 1, c ) } );
+        }
+    } else if( trigger_keyboard_category == 3 ) {
+        // Simbolos
+        std::string syms = "!@#$%^&*()_+-=[]{}|;':\",./<>?~`";
+        for( char c : syms ) {
+            current_keys.push_back( { static_cast<int>( c ), std::string( 1, c ) } );
+        }
+    } else if( trigger_keyboard_category == 4 ) {
+        // Sistema & Setas
+        current_keys.push_back( { '\n', "ENTER" } );
+        current_keys.push_back( { 27, "ESC" } );
+        current_keys.push_back( { ' ', "ESPACO" } );
+        current_keys.push_back( { '\t', "TAB" } );
+        current_keys.push_back( { 127, "BACKSPACE" } );
+        current_keys.push_back( { KEY_DC, "DELETE" } );
+        current_keys.push_back( { KEY_UP, "^ CIMA" } );
+        current_keys.push_back( { KEY_DOWN, "v BAIXO" } );
+        current_keys.push_back( { KEY_LEFT, "< ESQ" } );
+        current_keys.push_back( { KEY_RIGHT, "> DIR" } );
+        current_keys.push_back( { KEY_PPAGE, "PG UP" } );
+        current_keys.push_back( { KEY_NPAGE, "PG DN" } );
+        current_keys.push_back( { KEY_HOME, "HOME" } );
+        current_keys.push_back( { KEY_END, "END" } );
+    } else if( trigger_keyboard_category == 5 ) {
+        // F1-F12
+        for( int f = 1; f <= 12; ++f ) {
+            current_keys.push_back( { KEY_F( f ), string_format( "F%d", f ) } );
+        }
+    }
+
+    int k_btn_w = 54;
+    int k_btn_h = 36;
+    int k_gap = 6;
+    int cols_per_row = ( modal_box.w - 44 ) / ( k_btn_w + k_gap );
+
+    for( size_t i = 0; i < current_keys.size(); ++i ) {
+        int r = static_cast<int>( i ) / cols_per_row;
+        int c = static_cast<int>( i ) % cols_per_row;
+
+        int kx = modal_box.x + 22 + c * ( k_btn_w + k_gap );
+        int ky = grid_y + r * ( k_btn_h + k_gap );
+
+        SDL_Rect k_rect = { kx, ky, k_btn_w, k_btn_h };
+        SetRenderDrawColor( renderer, 25, 38, 58, 240 );
+        RenderFillRect( renderer, &k_rect );
+        SetRenderDrawColor( renderer, 55, 85, 125, 255 );
+        RenderDrawRect( renderer, &k_rect );
+
+        std::string d_str = current_keys[i].second;
+        int tx = k_rect.x + ( k_rect.w - ( font->width * utf8_width( d_str ) ) ) / 2;
+        int t_y = k_rect.y + ( k_rect.h - font->height ) / 2;
+        font->OutputChar( renderer, d_str, point( tx, t_y ), 15 );
+    }
+
+    // Rodape com Controles de Estilo (Tamanho, Opacidade, Cor) e Botoes de Acao
+    int foot_y = modal_box.y + modal_box.h - 90;
+
+    // Linha de ajustes rapidos
+    std::string sz_str = string_format( _( "Tamanho: %dpx [ - ] [ + ]" ), temp_editing_trigger.size );
+    font->OutputChar( renderer, sz_str, point( modal_box.x + 22, foot_y + 8 ), 14 );
+
+    std::string op_str = string_format( _( "Opacidade: %d%% [ - ] [ + ]" ), static_cast<int>( temp_editing_trigger.opacity * 100.0f ) );
+    font->OutputChar( renderer, op_str, point( modal_box.x + 280, foot_y + 8 ), 14 );
+
+    std::string cor_str = string_format( _( "Tema de Cor: %d [ ALTERNAR ]" ), temp_editing_trigger.color_theme + 1 );
+    font->OutputChar( renderer, cor_str, point( modal_box.x + 540, foot_y + 8 ), 11 );
+
+    // Botoes finais: [ SALVAR GATILHO ], [ LIMPAR TECLAS ], [ CANCELAR ]
+    int act_y = foot_y + 40;
+    SDL_Rect btn_save_trig = { modal_box.x + 22, act_y, 240, 38 };
+    SetRenderDrawColor( renderer, 35, 150, 85, 255 );
+    RenderFillRect( renderer, &btn_save_trig );
+    SetRenderDrawColor( renderer, 50, 220, 120, 255 );
+    RenderDrawRect( renderer, &btn_save_trig );
+    std::string st_lbl = _( "[ SALVAR GATILHO ]" );
+    font->OutputChar( renderer, st_lbl, point( btn_save_trig.x + 36, btn_save_trig.y + 10 ), 15 );
+
+    SDL_Rect btn_clear_keys = { btn_save_trig.x + btn_save_trig.w + 14, act_y, 180, 38 };
+    SetRenderDrawColor( renderer, 120, 80, 25, 240 );
+    RenderFillRect( renderer, &btn_clear_keys );
+    SetRenderDrawColor( renderer, 200, 140, 45, 255 );
+    RenderDrawRect( renderer, &btn_clear_keys );
+    std::string cl_lbl = _( "LIMPAR TECLAS" );
+    font->OutputChar( renderer, cl_lbl, point( btn_clear_keys.x + 24, btn_clear_keys.y + 10 ), 15 );
+
+    SDL_Rect btn_cancel_trig = { btn_clear_keys.x + btn_clear_keys.w + 14, act_y, 140, 38 };
+    SetRenderDrawColor( renderer, 60, 25, 25, 240 );
+    RenderFillRect( renderer, &btn_cancel_trig );
+    SetRenderDrawColor( renderer, 150, 50, 50, 255 );
+    RenderDrawRect( renderer, &btn_cancel_trig );
+    std::string ct_lbl = _( "CANCELAR" );
+    font->OutputChar( renderer, ct_lbl, point( btn_cancel_trig.x + 26, btn_cancel_trig.y + 10 ), 15 );
+
+    SetRenderDrawBlendMode( renderer, SDL_BLENDMODE_NONE );
+}
+
+// ============================================================================
+// MODAL DE SALVAR ESQUEMA COM NOME
+// ============================================================================
+
+void mobile_ui_system::draw_save_scheme_modal( const SDL_Renderer_Ptr &renderer, Font *font )
+{
+    SetRenderDrawBlendMode( renderer, SDL_BLENDMODE_BLEND );
+
+    SDL_Rect overlay = { 0, 0, screen_width, screen_height };
+    SetRenderDrawColor( renderer, 5, 8, 15, 215 );
+    RenderFillRect( renderer, &overlay );
+
+    int m_w = std::min( 680, static_cast<int>( screen_width * 0.90f ) );
+    int m_h = 360;
+    SDL_Rect modal_box = { ( screen_width - m_w ) / 2, ( screen_height - m_h ) / 2, m_w, m_h };
+
+    SetRenderDrawColor( renderer, 14, 20, 32, 255 );
+    RenderFillRect( renderer, &modal_box );
+    SetRenderDrawColor( renderer, 40, 120, 220, 255 );
+    RenderDrawRect( renderer, &modal_box );
+
+    font->OutputChar( renderer, _( "SALVAR ESQUEMA DE INTERFACE" ), point( modal_box.x + 24, modal_box.y + 20 ), 11 );
+    font->OutputChar( renderer, _( "Escolha um nome para salvar o seu pacote de botoes no celular:" ), point( modal_box.x + 24, modal_box.y + 54 ), 15 );
+
+    std::vector<std::string> preset_names = {
+        _( "Combate Tatil" ),
+        _( "Exploracao & Loot" ),
+        _( "Veiculos & Direcao" ),
+        _( "Sobrevivencia Rapida" ),
+        _( "Personalizado 1" ),
+        _( "Personalizado 2" )
+    };
+
+    int ny = modal_box.y + 90;
+    for( size_t i = 0; i < preset_names.size(); ++i ) {
+        int r = static_cast<int>( i ) / 2;
+        int c = static_cast<int>( i ) % 2;
+        int bx = modal_box.x + 24 + c * ( ( modal_box.w - 60 ) / 2 + 12 );
+        int by = ny + r * 46;
+
+        SDL_Rect b_rect = { bx, by, ( modal_box.w - 60 ) / 2, 38 };
+        bool is_sel_name = ( temp_scheme_name_input == preset_names[i] );
+
+        SetRenderDrawColor( renderer, is_sel_name ? 25 : 20, is_sel_name ? 75 : 30, is_sel_name ? 150 : 50, 240 );
+        RenderFillRect( renderer, &b_rect );
+        SetRenderDrawColor( renderer, is_sel_name ? 60 : 40, is_sel_name ? 160 : 70, is_sel_name ? 255 : 100, 255 );
+        RenderDrawRect( renderer, &b_rect );
+
+        font->OutputChar( renderer, preset_names[i], point( b_rect.x + 14, b_rect.y + 10 ), is_sel_name ? 11 : 15 );
+    }
+
+    // Botoes [ CONFIRMAR ] e [ CANCELAR ]
+    int act_y = modal_box.y + modal_box.h - 60;
+    SDL_Rect btn_ok = { modal_box.x + 24, act_y, 220, 42 };
+    SetRenderDrawColor( renderer, 35, 150, 85, 255 );
+    RenderFillRect( renderer, &btn_ok );
+    SetRenderDrawColor( renderer, 50, 220, 120, 255 );
+    RenderDrawRect( renderer, &btn_ok );
+    font->OutputChar( renderer, _( "[ SALVAR ESQUEMA ]" ), point( btn_ok.x + 24, btn_ok.y + 12 ), 15 );
+
+    SDL_Rect btn_cancel = { btn_ok.x + btn_ok.w + 16, act_y, 160, 42 };
+    SetRenderDrawColor( renderer, 60, 25, 25, 240 );
+    RenderFillRect( renderer, &btn_cancel );
+    SetRenderDrawColor( renderer, 150, 50, 50, 255 );
+    RenderDrawRect( renderer, &btn_cancel );
+    font->OutputChar( renderer, _( "CANCELAR" ), point( btn_cancel.x + 36, btn_cancel.y + 12 ), 15 );
+
+    SetRenderDrawBlendMode( renderer, SDL_BLENDMODE_NONE );
+}
+
+// ============================================================================
+// MODO DE POSICIONAMENTO TATIL NA TELA (DRAG & DROP)
+// ============================================================================
+
+void mobile_ui_system::draw_positioning_mode( const SDL_Renderer_Ptr &renderer, Font *font )
+{
+    SetRenderDrawBlendMode( renderer, SDL_BLENDMODE_BLEND );
+
+    if( selected_scheme_idx < 0 || selected_scheme_idx >= static_cast<int>( loaded_schemes.size() ) ) {
+        is_positioning_triggers = false;
+        return;
+    }
+
+    auto &cur_scheme = loaded_schemes[selected_scheme_idx];
+
+    // 1. Desenha todos os gatilhos deste esquema na tela
+    for( size_t i = 0; i < cur_scheme.triggers.size(); ++i ) {
+        auto &trig = cur_scheme.triggers[i];
+        trig.calculated_bounds.w = static_cast<int>( trig.size * density_scale );
+        trig.calculated_bounds.h = static_cast<int>( trig.size * density_scale );
+        trig.calculated_bounds.x = static_cast<int>( trig.x_pct * screen_width ) - trig.calculated_bounds.w / 2;
+        trig.calculated_bounds.y = static_cast<int>( trig.y_pct * screen_height ) - trig.calculated_bounds.h / 2;
+
+        bool is_selected = ( static_cast<int>( i ) == selected_trigger_idx );
+        draw_custom_trigger_button( renderer, font, trig, is_selected );
+    }
+
+    // 2. Barra Flutuante de Ferramentas no Topo da Tela
+    int bar_w = std::min( 860, static_cast<int>( screen_width * 0.96f ) );
+    int bar_h = 56;
+    pos_bar_rect = { ( screen_width - bar_w ) / 2, 14, bar_w, bar_h };
+
+    SetRenderDrawColor( renderer, 10, 16, 28, 240 );
+    RenderFillRect( renderer, &pos_bar_rect );
+    SetRenderDrawColor( renderer, 255, 215, 0, 255 ); // Dourado brilhante
+    RenderDrawRect( renderer, &pos_bar_rect );
+
+    // Texto de instrucao a esquerda
+    font->OutputChar( renderer, _( "MODO ARRASTE: Toque e mova qualquer gatilho na tela" ), point( pos_bar_rect.x + 14, pos_bar_rect.y + 12 ), 11 );
+
+    // Botoes de ajuste fino do gatilho selecionado
+    int bx = pos_bar_rect.x + 14;
+    int by = pos_bar_rect.y + 28;
+
+    pos_btn_size_minus = { bx, by, 60, 22 };
+    pos_btn_size_plus = { bx + 64, by, 60, 22 };
+    pos_btn_opacity_minus = { bx + 136, by, 60, 22 };
+    pos_btn_opacity_plus = { bx + 200, by, 60, 22 };
+    pos_btn_color = { bx + 272, by, 90, 22 };
+    pos_btn_done = { pos_bar_rect.x + pos_bar_rect.w - 150, pos_bar_rect.y + 10, 136, 36 };
+
+    // Fundo dos mini-botoes
+    SetRenderDrawColor( renderer, 25, 38, 58, 255 );
+    RenderFillRect( renderer, &pos_btn_size_minus );
+    RenderFillRect( renderer, &pos_btn_size_plus );
+    RenderFillRect( renderer, &pos_btn_opacity_minus );
+    RenderFillRect( renderer, &pos_btn_opacity_plus );
+    RenderFillRect( renderer, &pos_btn_color );
+
+    SetRenderDrawColor( renderer, 60, 95, 140, 255 );
+    RenderDrawRect( renderer, &pos_btn_size_minus );
+    RenderDrawRect( renderer, &pos_btn_size_plus );
+    RenderDrawRect( renderer, &pos_btn_opacity_minus );
+    RenderDrawRect( renderer, &pos_btn_opacity_plus );
+    RenderDrawRect( renderer, &pos_btn_color );
+
+    font->OutputChar( renderer, "TAM -", point( pos_btn_size_minus.x + 6, pos_btn_size_minus.y + 4 ), 15 );
+    font->OutputChar( renderer, "TAM +", point( pos_btn_size_plus.x + 6, pos_btn_size_plus.y + 4 ), 15 );
+    font->OutputChar( renderer, "OPA -", point( pos_btn_opacity_minus.x + 6, pos_btn_opacity_minus.y + 4 ), 15 );
+    font->OutputChar( renderer, "OPA +", point( pos_btn_opacity_plus.x + 6, pos_btn_opacity_plus.y + 4 ), 15 );
+    font->OutputChar( renderer, "COR", point( pos_btn_color.x + 28, pos_btn_color.y + 4 ), 11 );
+
+    // Botao [ CONCLUIR ] em verde vibrante
+    SetRenderDrawColor( renderer, 35, 150, 85, 255 );
+    RenderFillRect( renderer, &pos_btn_done );
+    SetRenderDrawColor( renderer, 60, 230, 130, 255 );
+    RenderDrawRect( renderer, &pos_btn_done );
+    font->OutputChar( renderer, _( "[ CONCLUIR ]" ), point( pos_btn_done.x + 14, pos_btn_done.y + 9 ), 15 );
+
+    SetRenderDrawBlendMode( renderer, SDL_BLENDMODE_NONE );
+}
+
+// ============================================================================
+// TRATAMENTO DE TOQUES: ABA DE ESQUEMAS, MODAIS E ARRASTE
+// ============================================================================
+
+bool mobile_ui_system::handle_schemes_tab_touch( float x, float y )
+{
+    if( selected_scheme_idx < 0 || selected_scheme_idx >= static_cast<int>( loaded_schemes.size() ) ) {
+        selected_scheme_idx = 0;
+    }
+
+    auto &cur_scheme = loaded_schemes[selected_scheme_idx];
+
+    // 1. Botao [ + NOVO ESQUEMA ]
+    if( x >= schemes_btn_new_scheme.x && x <= schemes_btn_new_scheme.x + schemes_btn_new_scheme.w &&
+        y >= schemes_btn_new_scheme.y && y <= schemes_btn_new_scheme.y + schemes_btn_new_scheme.h ) {
+        interface_scheme ns;
+        ns.id = string_format( "esquema_%d", static_cast<int>( loaded_schemes.size() ) );
+        ns.name = string_format( _( "Novo Esquema %d" ), static_cast<int>( loaded_schemes.size() ) );
+        ns.description = _( "Esquema personalizado de gatilhos tatil." );
+        ns.is_default = false;
+        loaded_schemes.push_back( ns );
+        selected_scheme_idx = static_cast<int>( loaded_schemes.size() ) - 1;
+        save_current_as_temporary();
+        schemes_feedback_msg = string_format( _( "Esquema '%s' criado! Toque em [+ GATILHO] para configurar." ), ns.name );
+        return true;
+    }
+
+    // 2. Toque nos cards da lista de esquemas
+    for( size_t i = 0; i < schemes_cards_rects.size(); ++i ) {
+        const auto &rc = schemes_cards_rects[i];
+        if( x >= rc.x && x <= rc.x + rc.w && y >= rc.y && y <= rc.y + rc.h ) {
+            selected_scheme_idx = scheme_list_scroll_offset + static_cast<int>( i );
+            trigger_list_scroll_offset = 0;
+            return true;
+        }
+    }
+
+    // 3. Rolagem da lista de esquemas
+    if( x >= schemes_btn_scroll_up.x && x <= schemes_btn_scroll_up.x + schemes_btn_scroll_up.w &&
+        y >= schemes_btn_scroll_up.y && y <= schemes_btn_scroll_up.y + schemes_btn_scroll_up.h ) {
+        if( scheme_list_scroll_offset > 0 ) scheme_list_scroll_offset--;
+        return true;
+    }
+    if( x >= schemes_btn_scroll_down.x && x <= schemes_btn_scroll_down.x + schemes_btn_scroll_down.w &&
+        y >= schemes_btn_scroll_down.y && y <= schemes_btn_scroll_down.y + schemes_btn_scroll_down.h ) {
+        if( scheme_list_scroll_offset + 1 < static_cast<int>( loaded_schemes.size() ) ) scheme_list_scroll_offset++;
+        return true;
+    }
+
+    // 4. Botoes de Acao da Coluna Direita
+    // [ APLICAR NO JOGO ]
+    if( x >= scheme_btn_apply.x && x <= scheme_btn_apply.x + scheme_btn_apply.w &&
+        y >= scheme_btn_apply.y && y <= scheme_btn_apply.y + scheme_btn_apply.h ) {
+        apply_scheme( selected_scheme_idx );
+        return true;
+    }
+
+    // [ + GATILHO ]
+    if( x >= scheme_btn_add_trigger.x && x <= scheme_btn_add_trigger.x + scheme_btn_add_trigger.w &&
+        y >= scheme_btn_add_trigger.y && y <= scheme_btn_add_trigger.y + scheme_btn_add_trigger.h ) {
+        if( cur_scheme.is_default ) {
+            // Se tentar adicionar no padrao, clona para um esquema editavel
+            interface_scheme custom_copy = cur_scheme;
+            custom_copy.id = "esquema_personalizado";
+            custom_copy.name = _( "Meu Esquema Personalizado" );
+            custom_copy.is_default = false;
+            loaded_schemes.push_back( custom_copy );
+            selected_scheme_idx = static_cast<int>( loaded_schemes.size() ) - 1;
+        }
+        temp_editing_trigger = custom_trigger();
+        temp_editing_trigger.id = string_format( "trig_%d", static_cast<int>( loaded_schemes[selected_scheme_idx].triggers.size() ) );
+        temp_editing_trigger.label = "AÇÃO";
+        trigger_config_modal_open = true;
+        return true;
+    }
+
+    // [ POSICIONAR NA TELA ]
+    if( x >= scheme_btn_position_screen.x && x <= scheme_btn_position_screen.x + scheme_btn_position_screen.w &&
+        y >= scheme_btn_position_screen.y && y <= scheme_btn_position_screen.y + scheme_btn_position_screen.h ) {
+        if( cur_scheme.triggers.empty() ) {
+            // Cria um gatilho de exemplo se estiver vazio
+            custom_trigger def_trig;
+            def_trig.label = "TIRO";
+            def_trig.keys = { 'f', 'f' };
+            cur_scheme.triggers.push_back( def_trig );
+        }
+        settings_open = false;
+        is_positioning_triggers = true;
+        selected_trigger_idx = 0;
+        return true;
+    }
+
+    // [ SALVAR ESQUEMA ]
+    if( x >= scheme_btn_save_as.x && x <= scheme_btn_save_as.x + scheme_btn_save_as.w &&
+        y >= scheme_btn_save_as.y && y <= scheme_btn_save_as.y + scheme_btn_save_as.h ) {
+        temp_scheme_name_input = cur_scheme.name;
+        save_scheme_modal_open = true;
+        return true;
+    }
+
+    // [ EXCLUIR ESQUEMA ]
+    if( x >= scheme_btn_delete.x && x <= scheme_btn_delete.x + scheme_btn_delete.w &&
+        y >= scheme_btn_delete.y && y <= scheme_btn_delete.y + scheme_btn_delete.h ) {
+        delete_scheme_from_disk( selected_scheme_idx );
+        return true;
+    }
+
+    // 5. Excluir gatilho individual na lista
+    for( size_t i = 0; i < trigger_item_delete_rects.size(); ++i ) {
+        const auto &d_rc = trigger_item_delete_rects[i];
+        if( x >= d_rc.x && x <= d_rc.x + d_rc.w && y >= d_rc.y && y <= d_rc.y + d_rc.h ) {
+            size_t trig_idx = trigger_list_scroll_offset + i;
+            if( trig_idx < cur_scheme.triggers.size() ) {
+                cur_scheme.triggers.erase( cur_scheme.triggers.begin() + trig_idx );
+                save_current_as_temporary();
+                schemes_feedback_msg = _( "Gatilho removido." );
+                return true;
+            }
+        }
+    }
+
+    return true;
+}
+
+bool mobile_ui_system::handle_trigger_config_touch( float x, float y )
+{
+    int m_w = std::min( 920, static_cast<int>( screen_width * 0.94f ) );
+    int m_h = std::min( 620, static_cast<int>( screen_height * 0.94f ) );
+    SDL_Rect modal_box = { ( screen_width - m_w ) / 2, ( screen_height - m_h ) / 2, m_w, m_h };
+
+    int ty = modal_box.y + 14;
+    int lbl_y = ty + 56;
+    std::vector<std::string> quick_labels = { "TIRO", "INV", "RECARGA", "OLHAR", "MAPA", "ESPERAR", "ENTER", "ESC", "C1", "C2" };
+    int qx = modal_box.x + 130;
+    for( const auto &ql : quick_labels ) {
+        int w = 50;
+        if( x >= qx && x <= qx + w && y >= lbl_y && y <= lbl_y + 26 ) {
+            temp_editing_trigger.label = ql;
+            return true;
+        }
+        qx += w + 6;
+    }
+
+    // Abas de categorias
+    int cat_y = lbl_y + 34;
+    int cat_w = ( modal_box.w - 44 - 30 ) / 6;
+    for( int i = 0; i < 6; ++i ) {
+        SDL_Rect cat_btn = { modal_box.x + 22 + i * ( cat_w + 6 ), cat_y, cat_w, 32 };
+        if( x >= cat_btn.x && x <= cat_btn.x + cat_btn.w && y >= cat_btn.y && y <= cat_btn.y + cat_btn.h ) {
+            trigger_keyboard_category = i;
+            return true;
+        }
+    }
+
+    // Teclas no grid
+    int grid_y = cat_y + 40;
+    std::vector<int> current_keys_codes;
+    if( trigger_keyboard_category == 0 ) {
+        for( char c = 'a'; c <= 'z'; ++c ) current_keys_codes.push_back( static_cast<int>( c ) );
+    } else if( trigger_keyboard_category == 1 ) {
+        for( char c = 'A'; c <= 'Z'; ++c ) current_keys_codes.push_back( static_cast<int>( c ) );
+    } else if( trigger_keyboard_category == 2 ) {
+        for( char c = '0'; c <= '9'; ++c ) current_keys_codes.push_back( static_cast<int>( c ) );
+    } else if( trigger_keyboard_category == 3 ) {
+        std::string syms = "!@#$%^&*()_+-=[]{}|;':\",./<>?~`";
+        for( char c : syms ) current_keys_codes.push_back( static_cast<int>( c ) );
+    } else if( trigger_keyboard_category == 4 ) {
+        current_keys_codes = { '\n', 27, ' ', '\t', 127, KEY_DC, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_PPAGE, KEY_NPAGE, KEY_HOME, KEY_END };
+    } else if( trigger_keyboard_category == 5 ) {
+        for( int f = 1; f <= 12; ++f ) current_keys_codes.push_back( KEY_F( f ) );
+    }
+
+    int k_btn_w = 54;
+    int k_btn_h = 36;
+    int k_gap = 6;
+    int cols_per_row = ( modal_box.w - 44 ) / ( k_btn_w + k_gap );
+
+    for( size_t i = 0; i < current_keys_codes.size(); ++i ) {
+        int r = static_cast<int>( i ) / cols_per_row;
+        int c = static_cast<int>( i ) % cols_per_row;
+        int kx = modal_box.x + 22 + c * ( k_btn_w + k_gap );
+        int ky = grid_y + r * ( k_btn_h + k_gap );
+
+        if( x >= kx && x <= kx + k_btn_w && y >= ky && y <= ky + k_btn_h ) {
+            temp_editing_trigger.keys.push_back( current_keys_codes[i] );
+            if( temp_editing_trigger.label == "AÇÃO" && current_keys_codes[i] >= 32 && current_keys_codes[i] <= 126 ) {
+                temp_editing_trigger.label = std::string( 1, static_cast<char>( current_keys_codes[i] ) );
+            }
+            return true;
+        }
+    }
+
+    // Controles de Tamanho, Opacidade e Cor
+    int foot_y = modal_box.y + modal_box.h - 90;
+
+    // Tamanho [-] e [+]
+    if( y >= foot_y && y <= foot_y + 30 ) {
+        if( x >= modal_box.x + 120 && x <= modal_box.x + 160 ) {
+            temp_editing_trigger.size = std::clamp( temp_editing_trigger.size - 6, 36, 120 );
+            return true;
+        }
+        if( x >= modal_box.x + 170 && x <= modal_box.x + 210 ) {
+            temp_editing_trigger.size = std::clamp( temp_editing_trigger.size + 6, 36, 120 );
+            return true;
+        }
+        // Opacidade [-] e [+]
+        if( x >= modal_box.x + 400 && x <= modal_box.x + 440 ) {
+            temp_editing_trigger.opacity = std::clamp( temp_editing_trigger.opacity - 0.1f, 0.2f, 1.0f );
+            return true;
+        }
+        if( x >= modal_box.x + 450 && x <= modal_box.x + 490 ) {
+            temp_editing_trigger.opacity = std::clamp( temp_editing_trigger.opacity + 0.1f, 0.2f, 1.0f );
+            return true;
+        }
+        // Alternar Cor
+        if( x >= modal_box.x + 650 && x <= modal_box.x + 780 ) {
+            temp_editing_trigger.color_theme = ( temp_editing_trigger.color_theme + 1 ) % 6;
+            return true;
+        }
+    }
+
+    // Botoes finais: [ SALVAR GATILHO ], [ LIMPAR TECLAS ], [ CANCELAR ]
+    int act_y = foot_y + 40;
+    SDL_Rect btn_save_trig = { modal_box.x + 22, act_y, 240, 38 };
+    if( x >= btn_save_trig.x && x <= btn_save_trig.x + btn_save_trig.w &&
+        y >= btn_save_trig.y && y <= btn_save_trig.y + btn_save_trig.h ) {
+        if( selected_scheme_idx >= 0 && selected_scheme_idx < static_cast<int>( loaded_schemes.size() ) ) {
+            loaded_schemes[selected_scheme_idx].triggers.push_back( temp_editing_trigger );
+            save_current_as_temporary();
+            schemes_feedback_msg = string_format( _( "Gatilho '%s' adicionado com sucesso!" ), temp_editing_trigger.label );
+        }
+        trigger_config_modal_open = false;
+        return true;
+    }
+
+    SDL_Rect btn_clear_keys = { btn_save_trig.x + btn_save_trig.w + 14, act_y, 180, 38 };
+    if( x >= btn_clear_keys.x && x <= btn_clear_keys.x + btn_clear_keys.w &&
+        y >= btn_clear_keys.y && y <= btn_clear_keys.y + btn_clear_keys.h ) {
+        temp_editing_trigger.keys.clear();
+        return true;
+    }
+
+    SDL_Rect btn_cancel_trig = { btn_clear_keys.x + btn_clear_keys.w + 14, act_y, 140, 38 };
+    if( x >= btn_cancel_trig.x && x <= btn_cancel_trig.x + btn_cancel_trig.w &&
+        y >= btn_cancel_trig.y && y <= btn_cancel_trig.y + btn_cancel_trig.h ) {
+        trigger_config_modal_open = false;
+        return true;
+    }
+
+    return true;
+}
+
+bool mobile_ui_system::handle_save_scheme_touch( float x, float y )
+{
+    int m_w = std::min( 680, static_cast<int>( screen_width * 0.90f ) );
+    int m_h = 360;
+    SDL_Rect modal_box = { ( screen_width - m_w ) / 2, ( screen_height - m_h ) / 2, m_w, m_h };
+
+    std::vector<std::string> preset_names = {
+        _( "Combate Tatil" ),
+        _( "Exploracao & Loot" ),
+        _( "Veiculos & Direcao" ),
+        _( "Sobrevivencia Rapida" ),
+        _( "Personalizado 1" ),
+        _( "Personalizado 2" )
+    };
+
+    int ny = modal_box.y + 90;
+    for( size_t i = 0; i < preset_names.size(); ++i ) {
+        int r = static_cast<int>( i ) / 2;
+        int c = static_cast<int>( i ) % 2;
+        int bx = modal_box.x + 24 + c * ( ( modal_box.w - 60 ) / 2 + 12 );
+        int by = ny + r * 46;
+
+        SDL_Rect b_rect = { bx, by, ( modal_box.w - 60 ) / 2, 38 };
+        if( x >= b_rect.x && x <= b_rect.x + b_rect.w && y >= b_rect.y && y <= b_rect.y + b_rect.h ) {
+            temp_scheme_name_input = preset_names[i];
+            return true;
+        }
+    }
+
+    int act_y = modal_box.y + modal_box.h - 60;
+    SDL_Rect btn_ok = { modal_box.x + 24, act_y, 220, 42 };
+    if( x >= btn_ok.x && x <= btn_ok.x + btn_ok.w && y >= btn_ok.y && y <= btn_ok.y + btn_ok.h ) {
+        if( selected_scheme_idx >= 0 && selected_scheme_idx < static_cast<int>( loaded_schemes.size() ) ) {
+            auto new_scheme = loaded_schemes[selected_scheme_idx];
+            new_scheme.id = "esquema_" + std::to_string( std::time( nullptr ) % 10000 );
+            new_scheme.name = temp_scheme_name_input.empty() ? _( "Meu Esquema" ) : temp_scheme_name_input;
+            new_scheme.is_default = false;
+            save_scheme_to_disk( new_scheme );
+            load_all_schemes();
+            selected_scheme_idx = static_cast<int>( loaded_schemes.size() ) - 1;
+            schemes_feedback_msg = string_format( _( "Esquema '%s' salvo em Documentos/CataclysmDDA/schemes!" ), new_scheme.name );
+        }
+        save_scheme_modal_open = false;
+        return true;
+    }
+
+    SDL_Rect btn_cancel = { btn_ok.x + btn_ok.w + 16, act_y, 160, 42 };
+    if( x >= btn_cancel.x && x <= btn_cancel.x + btn_cancel.w && y >= btn_cancel.y && y <= btn_cancel.y + btn_cancel.h ) {
+        save_scheme_modal_open = false;
+        return true;
+    }
+
+    return true;
+}
+
+bool mobile_ui_system::handle_positioning_touch_down( float x, float y, int finger_id )
+{
+    // 1. Checa toques na barra flutuante de ferramentas no topo
+    if( x >= pos_btn_done.x && x <= pos_btn_done.x + pos_btn_done.w &&
+        y >= pos_btn_done.y && y <= pos_btn_done.y + pos_btn_done.h ) {
+        save_current_as_temporary();
+        is_positioning_triggers = false;
+        settings_open = true;
+        return true;
+    }
+
+    if( selected_scheme_idx >= 0 && selected_scheme_idx < static_cast<int>( loaded_schemes.size() ) ) {
+        auto &cur_scheme = loaded_schemes[selected_scheme_idx];
+        if( selected_trigger_idx >= 0 && selected_trigger_idx < static_cast<int>( cur_scheme.triggers.size() ) ) {
+            auto &trig = cur_scheme.triggers[selected_trigger_idx];
+            // Tamanho -
+            if( x >= pos_btn_size_minus.x && x <= pos_btn_size_minus.x + pos_btn_size_minus.w &&
+                y >= pos_btn_size_minus.y && y <= pos_btn_size_minus.y + pos_btn_size_minus.h ) {
+                trig.size = std::clamp( trig.size - 6, 36, 120 );
+                save_current_as_temporary();
+                return true;
+            }
+            // Tamanho +
+            if( x >= pos_btn_size_plus.x && x <= pos_btn_size_plus.x + pos_btn_size_plus.w &&
+                y >= pos_btn_size_plus.y && y <= pos_btn_size_plus.y + pos_btn_size_plus.h ) {
+                trig.size = std::clamp( trig.size + 6, 36, 120 );
+                save_current_as_temporary();
+                return true;
+            }
+            // Opacidade -
+            if( x >= pos_btn_opacity_minus.x && x <= pos_btn_opacity_minus.x + pos_btn_opacity_minus.w &&
+                y >= pos_btn_opacity_minus.y && y <= pos_btn_opacity_minus.y + pos_btn_opacity_minus.h ) {
+                trig.opacity = std::clamp( trig.opacity - 0.1f, 0.2f, 1.0f );
+                save_current_as_temporary();
+                return true;
+            }
+            // Opacidade +
+            if( x >= pos_btn_opacity_plus.x && x <= pos_btn_opacity_plus.x + pos_btn_opacity_plus.w &&
+                y >= pos_btn_opacity_plus.y && y <= pos_btn_opacity_plus.y + pos_btn_opacity_plus.h ) {
+                trig.opacity = std::clamp( trig.opacity + 0.1f, 0.2f, 1.0f );
+                save_current_as_temporary();
+                return true;
+            }
+            // Alternar Cor
+            if( x >= pos_btn_color.x && x <= pos_btn_color.x + pos_btn_color.w &&
+                y >= pos_btn_color.y && y <= pos_btn_color.y + pos_btn_color.h ) {
+                trig.color_theme = ( trig.color_theme + 1 ) % 6;
+                save_current_as_temporary();
+                return true;
+            }
+        }
+
+        // 2. Checa se tocou em algum gatilho na tela para iniciar o arraste (drag & drop)
+        for( size_t i = 0; i < cur_scheme.triggers.size(); ++i ) {
+            auto &trig = cur_scheme.triggers[i];
+            if( x >= trig.calculated_bounds.x && x <= trig.calculated_bounds.x + trig.calculated_bounds.w &&
+                y >= trig.calculated_bounds.y && y <= trig.calculated_bounds.y + trig.calculated_bounds.h ) {
+                selected_trigger_idx = static_cast<int>( i );
+                dragging_trigger_idx = static_cast<int>( i );
+                trig.active_finger_id = finger_id;
+                return true;
+            }
+        }
+    }
+
+    return true;
+}
+
+bool mobile_ui_system::handle_positioning_touch_motion( float x, float y, int finger_id )
+{
+    if( selected_scheme_idx >= 0 && selected_scheme_idx < static_cast<int>( loaded_schemes.size() ) ) {
+        auto &cur_scheme = loaded_schemes[selected_scheme_idx];
+        if( dragging_trigger_idx >= 0 && dragging_trigger_idx < static_cast<int>( cur_scheme.triggers.size() ) ) {
+            auto &trig = cur_scheme.triggers[dragging_trigger_idx];
+            if( trig.active_finger_id == finger_id ) {
+                // Atualiza as posicoes percentuais proporcionais em tempo real
+                trig.x_pct = std::clamp( x / static_cast<float>( screen_width ), 0.05f, 0.95f );
+                trig.y_pct = std::clamp( y / static_cast<float>( screen_height ), 0.08f, 0.95f );
+                return true;
+            }
+        }
+    }
+    return true;
+}
+
+bool mobile_ui_system::handle_positioning_touch_up( float /*x*/, float /*y*/, int finger_id )
+{
+    if( selected_scheme_idx >= 0 && selected_scheme_idx < static_cast<int>( loaded_schemes.size() ) ) {
+        auto &cur_scheme = loaded_schemes[selected_scheme_idx];
+        if( dragging_trigger_idx >= 0 && dragging_trigger_idx < static_cast<int>( cur_scheme.triggers.size() ) ) {
+            if( cur_scheme.triggers[dragging_trigger_idx].active_finger_id == finger_id ) {
+                cur_scheme.triggers[dragging_trigger_idx].active_finger_id = -1;
+                dragging_trigger_idx = -1;
+                // Salva automaticamente imediatamente a mudanca!
+                save_current_as_temporary();
+                return true;
+            }
+        }
+    }
+    dragging_trigger_idx = -1;
     return true;
 }
 

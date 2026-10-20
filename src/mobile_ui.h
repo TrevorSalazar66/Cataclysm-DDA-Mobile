@@ -146,6 +146,28 @@ struct community_mod_item {
     SDL_Rect install_rect { 0, 0, 0, 0 };
 };
 
+struct custom_trigger {
+    std::string id = "trig_0";
+    std::string label = "AÇÃO";
+    std::vector<int> keys;       // Lista de codigos de teclas a serem despachadas sequencialmente
+    float x_pct = 0.85f;         // Posicao horizontal proporcional da tela (0.0 a 1.0)
+    float y_pct = 0.50f;         // Posicao vertical proporcional da tela (0.0 a 1.0)
+    int size = 56;               // Tamanho base do botao quadrado em pixels
+    float opacity = 0.85f;       // Opacidade (0.2 a 1.0)
+    int color_theme = 0;         // 0: Azul Tatil, 1: Verde Sobrevivencia, 2: Vermelho Alerta, 3: Dourado, 4: Cinza Aco, 5: Roxo Arcano
+    bool is_pressed = false;
+    int active_finger_id = -1;
+    SDL_Rect calculated_bounds { 0, 0, 0, 0 };
+};
+
+struct interface_scheme {
+    std::string id = "padrao";
+    std::string name = "Esquema Padrão";
+    std::string description = "Layout oficial com D-Pad e cluster ergonomico de combate/inventario.";
+    bool is_default = false;
+    std::vector<custom_trigger> triggers;
+};
+
 class mobile_ui_system
 {
 public:
@@ -247,6 +269,71 @@ private:
     void install_community_mod( size_t index );
     void draw_mods_tab( const SDL_Renderer_Ptr &renderer, Font *font );
     bool handle_mods_tab_touch( float x, float y );
+
+    // === Sistema de Esquemas de Interface e Gatilhos Personalizados (Estilo Civilopedia / 2 Colunas) ===
+    bool is_positioning_triggers = false;
+    int dragging_trigger_idx = -1;
+    int selected_trigger_idx = -1;
+    int selected_scheme_idx = 0;
+    int active_applied_scheme_idx = 0;
+    int scheme_list_scroll_offset = 0;
+    int trigger_list_scroll_offset = 0;
+    std::string schemes_feedback_msg;
+
+    std::vector<input_event> pending_macro_events;
+
+    // Sub-modal: Adicionar / Configurar Gatilho (Catalogo Completo de 120 Teclas)
+    bool trigger_config_modal_open = false;
+    custom_trigger temp_editing_trigger;
+    int trigger_keyboard_category = 0; // 0=a-z, 1=A-Z, 2=0-9, 3=Simbolos, 4=Sistema/Setas, 5=F1-F12
+    int trigger_keyboard_scroll = 0;
+
+    // Sub-modal: Salvar Esquema com Nome
+    bool save_scheme_modal_open = false;
+    std::string temp_scheme_name_input;
+
+    // Retangulos de toque da Aba 2 (Esquemas)
+    SDL_Rect schemes_btn_new_scheme { 0, 0, 0, 0 };
+    std::vector<SDL_Rect> schemes_cards_rects;
+    SDL_Rect schemes_btn_scroll_up { 0, 0, 0, 0 };
+    SDL_Rect schemes_btn_scroll_down { 0, 0, 0, 0 };
+
+    // Retangulos da coluna direita
+    SDL_Rect scheme_btn_apply { 0, 0, 0, 0 };
+    SDL_Rect scheme_btn_add_trigger { 0, 0, 0, 0 };
+    SDL_Rect scheme_btn_position_screen { 0, 0, 0, 0 };
+    SDL_Rect scheme_btn_save_as { 0, 0, 0, 0 };
+    SDL_Rect scheme_btn_delete { 0, 0, 0, 0 };
+    std::vector<SDL_Rect> trigger_item_delete_rects;
+
+    // Retangulos da barra flutuante de posicionamento
+    SDL_Rect pos_bar_rect { 0, 0, 0, 0 };
+    SDL_Rect pos_btn_size_minus { 0, 0, 0, 0 };
+    SDL_Rect pos_btn_size_plus { 0, 0, 0, 0 };
+    SDL_Rect pos_btn_opacity_minus { 0, 0, 0, 0 };
+    SDL_Rect pos_btn_opacity_plus { 0, 0, 0, 0 };
+    SDL_Rect pos_btn_color { 0, 0, 0, 0 };
+    SDL_Rect pos_btn_done { 0, 0, 0, 0 };
+
+    // Lista de esquemas carregados
+    std::vector<interface_scheme> loaded_schemes;
+
+    void load_all_schemes();
+    void save_scheme_to_disk( const interface_scheme &scheme );
+    void save_current_as_temporary();
+    void delete_scheme_from_disk( size_t index );
+    void apply_scheme( size_t index );
+    void draw_schemes_tab( const SDL_Renderer_Ptr &renderer, Font *font );
+    bool handle_schemes_tab_touch( float x, float y );
+    void draw_positioning_mode( const SDL_Renderer_Ptr &renderer, Font *font );
+    bool handle_positioning_touch_down( float x, float y, int finger_id );
+    bool handle_positioning_touch_motion( float x, float y, int finger_id );
+    bool handle_positioning_touch_up( float x, float y, int finger_id );
+    void draw_trigger_config_modal( const SDL_Renderer_Ptr &renderer, Font *font );
+    bool handle_trigger_config_touch( float x, float y );
+    void draw_save_scheme_modal( const SDL_Renderer_Ptr &renderer, Font *font );
+    bool handle_save_scheme_touch( float x, float y );
+    void draw_custom_trigger_button( const SDL_Renderer_Ptr &renderer, Font *font, const custom_trigger &trig, bool highlight = false );
 };
 
 } // namespace cata_mobile
