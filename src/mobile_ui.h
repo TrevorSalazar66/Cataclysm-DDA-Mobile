@@ -165,6 +165,9 @@ struct interface_scheme {
     std::string name = "Esquema Padrão";
     std::string description = "Layout oficial com D-Pad e cluster ergonomico de combate/inventario.";
     bool is_default = false;
+    bool show_analog = true;
+    bool show_fixed_buttons = true;
+    bool show_context_slots = true;
     std::vector<custom_trigger> triggers;
 };
 
@@ -303,7 +306,11 @@ private:
     SDL_Rect scheme_btn_add_trigger { 0, 0, 0, 0 };
     SDL_Rect scheme_btn_position_screen { 0, 0, 0, 0 };
     SDL_Rect scheme_btn_save_as { 0, 0, 0, 0 };
+    SDL_Rect scheme_btn_clear_scheme { 0, 0, 0, 0 };
     SDL_Rect scheme_btn_delete { 0, 0, 0, 0 };
+    SDL_Rect scheme_btn_toggle_analog { 0, 0, 0, 0 };
+    SDL_Rect scheme_btn_toggle_fixed { 0, 0, 0, 0 };
+    SDL_Rect scheme_btn_toggle_context { 0, 0, 0, 0 };
     std::vector<SDL_Rect> trigger_item_delete_rects;
 
     // Retangulos da barra flutuante de posicionamento
