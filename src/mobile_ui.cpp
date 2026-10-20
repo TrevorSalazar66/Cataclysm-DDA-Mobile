@@ -3508,4 +3508,190 @@ bool mobile_ui_system::handle_save_scheme_touch( float x, float y )
     return true;
 }
 
+
+// ============================================================================
+// MODO DE POSICIONAMENTO TATIL NA TELA (DRAG & DROP)
+// ============================================================================
+
+void mobile_ui_system::draw_positioning_mode( const SDL_Renderer_Ptr &renderer, Font *font )
+{
+    SetRenderDrawBlendMode( renderer, SDL_BLENDMODE_BLEND );
+
+    if( selected_scheme_idx < 0 || selected_scheme_idx >= static_cast<int>( loaded_schemes.size() ) ) {
+        is_positioning_triggers = false;
+        return;
+    }
+
+    auto &cur_scheme = loaded_schemes[selected_scheme_idx];
+
+    // 1. Desenha todos os gatilhos deste esquema na tela
+    for( size_t i = 0; i < cur_scheme.triggers.size(); ++i ) {
+        auto &trig = cur_scheme.triggers[i];
+        trig.calculated_bounds.w = static_cast<int>( trig.size * density_scale );
+        trig.calculated_bounds.h = static_cast<int>( trig.size * density_scale );
+        trig.calculated_bounds.x = static_cast<int>( trig.x_pct * screen_width ) - trig.calculated_bounds.w / 2;
+        trig.calculated_bounds.y = static_cast<int>( trig.y_pct * screen_height ) - trig.calculated_bounds.h / 2;
+
+        bool is_selected = ( static_cast<int>( i ) == selected_trigger_idx );
+        draw_custom_trigger_button( renderer, font, trig, is_selected );
+    }
+
+    // 2. Barra Flutuante de Ferramentas no Topo da Tela
+    int bar_w = std::min( 860, static_cast<int>( screen_width * 0.96f ) );
+    int bar_h = 56;
+    pos_bar_rect = { ( screen_width - bar_w ) / 2, 14, bar_w, bar_h };
+
+    SetRenderDrawColor( renderer, 10, 16, 28, 240 );
+    RenderFillRect( renderer, &pos_bar_rect );
+    SetRenderDrawColor( renderer, 255, 215, 0, 255 ); // Dourado brilhante
+    RenderDrawRect( renderer, &pos_bar_rect );
+
+    // Texto de instrucao a esquerda
+    font->OutputChar( renderer, _( "MODO ARRASTE: Toque e mova qualquer gatilho na tela" ), point( pos_bar_rect.x + 14, pos_bar_rect.y + 12 ), 11 );
+
+    // Botoes de ajuste fino do gatilho selecionado
+    int bx = pos_bar_rect.x + 14;
+    int by = pos_bar_rect.y + 28;
+
+    pos_btn_size_minus = { bx, by, 60, 22 };
+    pos_btn_size_plus = { bx + 64, by, 60, 22 };
+    pos_btn_opacity_minus = { bx + 136, by, 60, 22 };
+    pos_btn_opacity_plus = { bx + 200, by, 60, 22 };
+    pos_btn_color = { bx + 272, by, 90, 22 };
+    pos_btn_done = { pos_bar_rect.x + pos_bar_rect.w - 150, pos_bar_rect.y + 10, 136, 36 };
+
+    // Fundo dos mini-botoes
+    SetRenderDrawColor( renderer, 25, 38, 58, 255 );
+    RenderFillRect( renderer, &pos_btn_size_minus );
+    RenderFillRect( renderer, &pos_btn_size_plus );
+    RenderFillRect( renderer, &pos_btn_opacity_minus );
+    RenderFillRect( renderer, &pos_btn_opacity_plus );
+    RenderFillRect( renderer, &pos_btn_color );
+
+    SetRenderDrawColor( renderer, 60, 95, 140, 255 );
+    RenderDrawRect( renderer, &pos_btn_size_minus );
+    RenderDrawRect( renderer, &pos_btn_size_plus );
+    RenderDrawRect( renderer, &pos_btn_opacity_minus );
+    RenderDrawRect( renderer, &pos_btn_opacity_plus );
+    RenderDrawRect( renderer, &pos_btn_color );
+
+    font->OutputChar( renderer, "TAM -", point( pos_btn_size_minus.x + 6, pos_btn_size_minus.y + 4 ), 15 );
+    font->OutputChar( renderer, "TAM +", point( pos_btn_size_plus.x + 6, pos_btn_size_plus.y + 4 ), 15 );
+    font->OutputChar( renderer, "OPA -", point( pos_btn_opacity_minus.x + 6, pos_btn_opacity_minus.y + 4 ), 15 );
+    font->OutputChar( renderer, "OPA +", point( pos_btn_opacity_plus.x + 6, pos_btn_opacity_plus.y + 4 ), 15 );
+    font->OutputChar( renderer, "COR", point( pos_btn_color.x + 28, pos_btn_color.y + 4 ), 11 );
+
+    // Botao [ CONCLUIR ] em verde vibrante
+    SetRenderDrawColor( renderer, 35, 150, 85, 255 );
+    RenderFillRect( renderer, &pos_btn_done );
+    SetRenderDrawColor( renderer, 60, 230, 130, 255 );
+    RenderDrawRect( renderer, &pos_btn_done );
+    font->OutputChar( renderer, _( "[ CONCLUIR ]" ), point( pos_btn_done.x + 14, pos_btn_done.y + 9 ), 15 );
+
+    SetRenderDrawBlendMode( renderer, SDL_BLENDMODE_NONE );
+}
+
+bool mobile_ui_system::handle_positioning_touch_down( float x, float y, int finger_id )
+{
+    // 1. Checa toques na barra flutuante de ferramentas no topo
+    if( x >= pos_btn_done.x && x <= pos_btn_done.x + pos_btn_done.w &&
+        y >= pos_btn_done.y && y <= pos_btn_done.y + pos_btn_done.h ) {
+        save_current_as_temporary();
+        is_positioning_triggers = false;
+        settings_open = true;
+        return true;
+    }
+
+    if( selected_scheme_idx >= 0 && selected_scheme_idx < static_cast<int>( loaded_schemes.size() ) ) {
+        auto &cur_scheme = loaded_schemes[selected_scheme_idx];
+        if( selected_trigger_idx >= 0 && selected_trigger_idx < static_cast<int>( cur_scheme.triggers.size() ) ) {
+            auto &trig = cur_scheme.triggers[selected_trigger_idx];
+            // Tamanho -
+            if( x >= pos_btn_size_minus.x && x <= pos_btn_size_minus.x + pos_btn_size_minus.w &&
+                y >= pos_btn_size_minus.y && y <= pos_btn_size_minus.y + pos_btn_size_minus.h ) {
+                trig.size = std::clamp( trig.size - 6, 36, 120 );
+                save_current_as_temporary();
+                return true;
+            }
+            // Tamanho +
+            if( x >= pos_btn_size_plus.x && x <= pos_btn_size_plus.x + pos_btn_size_plus.w &&
+                y >= pos_btn_size_plus.y && y <= pos_btn_size_plus.y + pos_btn_size_plus.h ) {
+                trig.size = std::clamp( trig.size + 6, 36, 120 );
+                save_current_as_temporary();
+                return true;
+            }
+            // Opacidade -
+            if( x >= pos_btn_opacity_minus.x && x <= pos_btn_opacity_minus.x + pos_btn_opacity_minus.w &&
+                y >= pos_btn_opacity_minus.y && y <= pos_btn_opacity_minus.y + pos_btn_opacity_minus.h ) {
+                trig.opacity = std::clamp( trig.opacity - 0.1f, 0.2f, 1.0f );
+                save_current_as_temporary();
+                return true;
+            }
+            // Opacidade +
+            if( x >= pos_btn_opacity_plus.x && x <= pos_btn_opacity_plus.x + pos_btn_opacity_plus.w &&
+                y >= pos_btn_opacity_plus.y && y <= pos_btn_opacity_plus.y + pos_btn_opacity_plus.h ) {
+                trig.opacity = std::clamp( trig.opacity + 0.1f, 0.2f, 1.0f );
+                save_current_as_temporary();
+                return true;
+            }
+            // Alternar Cor
+            if( x >= pos_btn_color.x && x <= pos_btn_color.x + pos_btn_color.w &&
+                y >= pos_btn_color.y && y <= pos_btn_color.y + pos_btn_color.h ) {
+                trig.color_theme = ( trig.color_theme + 1 ) % 6;
+                save_current_as_temporary();
+                return true;
+            }
+        }
+
+        // 2. Checa se tocou em algum gatilho na tela para iniciar o arraste (drag & drop)
+        for( size_t i = 0; i < cur_scheme.triggers.size(); ++i ) {
+            auto &trig = cur_scheme.triggers[i];
+            if( x >= trig.calculated_bounds.x && x <= trig.calculated_bounds.x + trig.calculated_bounds.w &&
+                y >= trig.calculated_bounds.y && y <= trig.calculated_bounds.y + trig.calculated_bounds.h ) {
+                selected_trigger_idx = static_cast<int>( i );
+                dragging_trigger_idx = static_cast<int>( i );
+                trig.active_finger_id = finger_id;
+                return true;
+            }
+        }
+    }
+
+    return true;
+}
+
+bool mobile_ui_system::handle_positioning_touch_motion( float x, float y, int finger_id )
+{
+    if( selected_scheme_idx >= 0 && selected_scheme_idx < static_cast<int>( loaded_schemes.size() ) ) {
+        auto &cur_scheme = loaded_schemes[selected_scheme_idx];
+        if( dragging_trigger_idx >= 0 && dragging_trigger_idx < static_cast<int>( cur_scheme.triggers.size() ) ) {
+            auto &trig = cur_scheme.triggers[dragging_trigger_idx];
+            if( trig.active_finger_id == finger_id ) {
+                // Atualiza as posicoes percentuais proporcionais em tempo real
+                trig.x_pct = std::clamp( x / static_cast<float>( screen_width ), 0.05f, 0.95f );
+                trig.y_pct = std::clamp( y / static_cast<float>( screen_height ), 0.08f, 0.95f );
+                return true;
+            }
+        }
+    }
+    return true;
+}
+
+bool mobile_ui_system::handle_positioning_touch_up( float /*x*/, float /*y*/, int finger_id )
+{
+    if( selected_scheme_idx >= 0 && selected_scheme_idx < static_cast<int>( loaded_schemes.size() ) ) {
+        auto &cur_scheme = loaded_schemes[selected_scheme_idx];
+        if( dragging_trigger_idx >= 0 && dragging_trigger_idx < static_cast<int>( cur_scheme.triggers.size() ) ) {
+            if( cur_scheme.triggers[dragging_trigger_idx].active_finger_id == finger_id ) {
+                cur_scheme.triggers[dragging_trigger_idx].active_finger_id = -1;
+                dragging_trigger_idx = -1;
+                // Salva automaticamente imediatamente a mudanca!
+                save_current_as_temporary();
+                return true;
+            }
+        }
+    }
+    dragging_trigger_idx = -1;
+    return true;
+}
+
 } // namespace cata_mobile
